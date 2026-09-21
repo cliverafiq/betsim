@@ -160,7 +160,9 @@ seasons only, updated after each settled game. A pure function with unit tests.
 
 ## Metrics and statistics
 
-- **CLV** = `d_taken / d_close - 1` at the designated bookmaker. Primary metric: best-evidenced skill
+- **CLV** = `d_taken / d_close - 1` at the designated bookmaker (DraftKings,
+  region `us`; see the correction in `PLAN.md` -- Pinnacle is not served on
+  this account and the EU region quotes NHL as a 3-way market). Primary metric: best-evidenced skill
   signal in the literature and far faster to settle than ROI. Compare against the **`random` arm's
   CLV distribution**, not zero — betting at the slate snapshot accrues CLV from timing alone, and
   `random` bets at the same snapshots with no skill, which makes it the correct null.

@@ -23,11 +23,23 @@ MAX_SNAPSHOT_AGE = timedelta(minutes=60)
 CLOSING_WINDOW = timedelta(minutes=15)
 
 # --- market -----------------------------------------------------------------
-# Pinnacle runs 2-3% margins against a typical 5%+, and its closing line is the
-# industry-standard CLV benchmark. Since CLV is the primary metric, the
-# benchmark must be the sharpest line available.
-DESIGNATED_BOOKMAKER = "pinnacle"
-REGION = "eu"
+# Chosen from what the account can actually see, measured on a live 33-game
+# slate rather than assumed. Pinnacle was the plan's designated book -- 2-3%
+# margins, the industry-standard CLV benchmark -- but it is not served on this
+# account: it returns games with no bookmaker entry at all.
+#
+# The EU region is also the wrong place to look. Twelve of its seventeen NHL
+# books quote **3-way** h2h on regulation time, with a Draw, which is a
+# different market from the 2-way moneyline this experiment is built on.
+#
+# Every US-region book is 2-way, and DraftKings is the only one covering all 33
+# games (median margin 4.28%). Sharper books exist there -- betonlineag and
+# lowvig at 3.17% -- but each covers only about a fifth of the slate, which is
+# useless for a designated book. The cost of this substitution is a softer
+# closing line than Pinnacle's, so CLV is a slightly weaker benchmark than
+# planned; it is still the best available and remains the primary metric.
+DESIGNATED_BOOKMAKER = "draftkings"
+REGION = "us"
 MARKET = "h2h"
 PRIMARY_DEVIG_METHOD = "shin"
 

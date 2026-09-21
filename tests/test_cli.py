@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 from betsim.cli import main
+from betsim.config import DESIGNATED_BOOKMAKER
 from betsim.context import assert_no_odds_leak, context_hash
 from betsim.db import connect
 from betsim.decider import Stage2Decider
@@ -129,12 +130,12 @@ def test_closing_marks_only_the_games_inside_the_window(tmp_path, monkeypatch, o
 def test_odds_warns_when_the_designated_bookmaker_is_missing(
     tmp_path, monkeypatch, capsys, odds_payload
 ):
-    # Losing Pinnacle would silently break CLV, the primary metric.
+    # Losing the designated book would silently break CLV, the primary metric.
     for event in odds_payload:
-        event["bookmakers"] = [b for b in event["bookmakers"] if b["key"] != "pinnacle"]
+        event["bookmakers"] = [b for b in event["bookmakers"] if b["key"] != DESIGNATED_BOOKMAKER]
     stub_client(monkeypatch, odds_payload)
     assert main(["odds", "--db", str(tmp_path / "b.db")]) == 0
-    assert "WARNING: no prices from pinnacle" in capsys.readouterr().out
+    assert f"WARNING: no prices from {DESIGNATED_BOOKMAKER}" in capsys.readouterr().out
 
 
 def test_scores_settles_only_completed_games(

@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from betsim.arms import ArmBet
+from betsim.config import DESIGNATED_BOOKMAKER
 from betsim.db import connect, init_db
 from betsim.ingest import IngestedPrice
 from betsim.ledger import balance, place_bet, verify_ledger
@@ -114,7 +115,7 @@ def test_each_arm_settles_against_its_own_bankroll(conn):
 def _closing(conn, game_id, selection, price):
     insert_snapshots(
         conn,
-        [IngestedPrice(game_id, "pinnacle", "h2h", selection, price, None)],
+        [IngestedPrice(game_id, DESIGNATED_BOOKMAKER, "h2h", selection, price, None)],
         captured_utc=PLACED + timedelta(hours=1),
         closing_game_ids={game_id},
     )
@@ -144,7 +145,7 @@ def test_only_closing_snapshots_count(conn):
     place_bet(conn, "llm_s1", bet("g_win", price=2.10), placed_utc=PLACED)
     insert_snapshots(
         conn,
-        [IngestedPrice("g_win", "pinnacle", "h2h", "home", 2.00, None)],
+        [IngestedPrice("g_win", DESIGNATED_BOOKMAKER, "h2h", "home", 2.00, None)],
         captured_utc=PLACED,
         closing_game_ids=set(),
     )

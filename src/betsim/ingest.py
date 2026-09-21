@@ -121,11 +121,20 @@ def parse_odds(
     *,
     market: str = "h2h",
     bookmakers: Sequence[str] | None = None,
+    market_width: int | None = None,
 ) -> tuple[list[IngestedGame], list[IngestedPrice]]:
     """Parse an /odds response into games and one price row per outcome per book.
 
     Every bookmaker returned is kept, because the de-vigged consensus needs the
     full cross-section; ``bookmakers`` narrows that only when explicitly asked.
+
+    ``market_width`` drops books quoting a different number of outcomes, and it
+    is not optional in practice for NHL. European books price NHL h2h as **3-way
+    on regulation time**, with a Draw, while North American books price the
+    2-way moneyline including overtime and the shootout. They are different
+    markets that share an endpoint: a 3-way bet on a team *loses* when that team
+    wins in overtime. Mixing them would corrupt the de-vigged consensus, the
+    tier assignment and settlement all at once.
     """
     wanted = {b.casefold() for b in bookmakers} if bookmakers else None
     games: list[IngestedGame] = []
@@ -142,7 +151,10 @@ def parse_odds(
             for mkt in book.get("markets") or []:
                 if mkt.get("key") != market:
                     continue
-                for outcome in mkt.get("outcomes") or []:
+                outcomes = mkt.get("outcomes") or []
+                if market_width is not None and len(outcomes) != market_width:
+                    continue
+                for outcome in outcomes:
                     if "name" not in outcome or "price" not in outcome:
                         raise IngestError(f"malformed outcome in {key!r}: {outcome!r}")
                     prices.append(
@@ -201,3 +213,18 @@ def parse_scores(payload: Sequence[Mapping[str, Any]]) -> list[IngestedScore]:
             )
         )
     return out
+
+
+def market_widths(
+    payload: Sequence[Mapping[str, Any]], *, market: str = "h2h"
+) -> dict[str, set[int]]:
+    """Outcome counts quoted by each bookmaker, for diagnosing a mixed feed."""
+    widths: dict[str, set[int]] = {}
+    for event in payload:
+        for book in event.get("bookmakers") or []:
+            for mkt in book.get("markets") or []:
+                if mkt.get("key") == market:
+                    widths.setdefault(str(book.get("key", "")), set()).add(
+                        len(mkt.get("outcomes") or [])
+                    )
+    return widths

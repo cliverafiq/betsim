@@ -5,6 +5,7 @@ import pytest
 from betsim.devig import consensus
 from betsim.ingest import (
     IngestError,
+    market_widths,
     outcome_to_selection,
     parse_events,
     parse_odds,
@@ -75,19 +76,19 @@ def test_parse_odds_maps_every_book(odds_payload):
     games, prices = parse_odds(odds_payload)
     assert len(games) == 3
     assert len(prices) == 12  # 3 games x 2 books x 2 outcomes
-    assert {p.bookmaker for p in prices} == {"pinnacle", "betfair_ex_eu"}
+    assert {p.bookmaker for p in prices} == {"draftkings", "bovada"}
     assert {p.selection for p in prices} == {"home", "away"}
-    pin_home = next(
+    dk_home = next(
         p
         for p in prices
-        if p.game_id == "nhl_car_fla" and p.bookmaker == "pinnacle" and p.selection == "home"
+        if p.game_id == "nhl_car_fla" and p.bookmaker == "draftkings" and p.selection == "home"
     )
-    assert pin_home.price_decimal == pytest.approx(2.10)
+    assert dk_home.price_decimal == pytest.approx(1.77)
 
 
 def test_parse_odds_can_narrow_to_one_book(odds_payload):
-    _, prices = parse_odds(odds_payload, bookmakers=["pinnacle"])
-    assert {p.bookmaker for p in prices} == {"pinnacle"}
+    _, prices = parse_odds(odds_payload, bookmakers=["draftkings"])
+    assert {p.bookmaker for p in prices} == {"draftkings"}
     assert len(prices) == 6
 
 
@@ -154,3 +155,86 @@ def test_scores_null_is_treated_as_no_scores(scores_payload):
     scores_payload[0]["scores"] = None
     parsed = parse_scores(scores_payload)[0]
     assert parsed.home_score is None
+
+
+# --- mixed market widths in one feed ----------------------------------------
+
+
+def _three_way(event):
+    """Turn one book's market into the 3-way form European books quote for NHL."""
+    book = event["bookmakers"][0]
+    market = book["markets"][0]
+    market["outcomes"] = [*market["outcomes"], {"name": "Draw", "price": 4.10}]
+    return book["key"]
+
+
+def test_market_width_filter_drops_three_way_books(odds_payload):
+    # European books price NHL h2h as 3-way on REGULATION time, with a Draw.
+    # That is a different market from the 2-way moneyline including overtime:
+    # a 3-way bet on a team loses when that team wins in OT. Mixing the two
+    # would corrupt the consensus, the tiers and settlement at once.
+    dropped = _three_way(odds_payload[0])
+    _, unfiltered = parse_odds(odds_payload)
+    _, filtered = parse_odds(odds_payload, market_width=2)
+    assert dropped in {p.bookmaker for p in unfiltered}
+    assert all(
+        not (p.bookmaker == dropped and p.game_id == odds_payload[0]["id"]) for p in filtered
+    )
+
+
+def test_a_draw_outcome_never_reaches_a_two_way_slate(odds_payload):
+    _three_way(odds_payload[0])
+    _, prices = parse_odds(odds_payload, market_width=2)
+    assert "draw" not in {p.selection for p in prices}
+
+
+def test_market_widths_reports_a_mixed_feed(odds_payload):
+    dropped = _three_way(odds_payload[0])
+    widths = market_widths(odds_payload)
+    assert 3 in widths[dropped]
+    assert widths["bovada"] == {2}
+
+
+def test_without_the_filter_a_mixed_feed_passes_through(odds_payload):
+    # Documents why the filter is not optional.
+    _three_way(odds_payload[0])
+    _, prices = parse_odds(odds_payload)
+    assert "draw" in {p.selection for p in prices}
+
+
+# --- the synthetic fixture must match the real schema -----------------------
+
+
+def test_synthetic_fixture_matches_the_live_recording(odds_payload):
+    """The small fixture is hand-built; this proves its shape is the real one."""
+    import json
+    from pathlib import Path
+
+    live_path = Path(__file__).parent / "fixtures" / "odds_icehockey_nhl_live.json"
+    live = json.loads(live_path.read_text())["payload"]
+
+    def shape(events):
+        ev = events[0]
+        bk = ev["bookmakers"][0]
+        mk = bk["markets"][0]
+        return (
+            set(ev) - {"bookmakers"},
+            set(bk) - {"markets"},
+            set(mk) - {"outcomes"},
+            set(mk["outcomes"][0]),
+        )
+
+    assert shape(odds_payload) == shape(live)
+
+
+def test_the_live_recording_parses_and_is_all_two_way():
+    import json
+    from pathlib import Path
+
+    live_path = Path(__file__).parent / "fixtures" / "odds_icehockey_nhl_live.json"
+    live = json.loads(live_path.read_text())["payload"]
+    games, prices = parse_odds(live, market_width=2)
+    assert len(games) > 20
+    assert {p.selection for p in prices} == {"home", "away"}
+    # Every US-region book quotes the 2-way moneyline, so nothing is dropped.
+    assert all(w == {2} for w in market_widths(live).values())

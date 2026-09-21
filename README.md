@@ -66,7 +66,7 @@ in `docs/PLAN.md`.
 
 ```bash
 uv sync                  # install
-uv run pytest            # 434 tests, no network, no API keys needed
+uv run pytest            # 440 tests, no network, no API keys needed
 uv run ruff check src tests
 uv run betsim init       # create an empty database
 ```
@@ -174,6 +174,19 @@ The ledger is append-only. Placing appends a negative row, settling appends a
 positive one, and a **loss appends a zero-delta row** so every settled bet leaves
 exactly two rows and settlement is never inferred from a missing one.
 `verify_ledger` re-derives the running balance and runs after every slate.
+
+### Market width: NHL is two different markets
+
+European books quote NHL h2h as **3-way on regulation time**, with a Draw.
+North American books quote the **2-way moneyline** including overtime and the
+shootout. They share an endpoint and are not interchangeable: a 3-way bet on a
+team *loses* when that team wins in OT. `parse_odds(market_width=...)` drops
+books quoting the wrong width, and `betsim odds` reports what it dropped.
+
+The designated bookmaker is **DraftKings, region `us`** -- chosen by measuring a
+live 33-game slate, not assumed. Pinnacle (the original plan) is not served on
+this account, and the EU region is mostly 3-way. See the correction in
+`docs/PLAN.md`.
 
 ### Closing snapshots and CLV
 

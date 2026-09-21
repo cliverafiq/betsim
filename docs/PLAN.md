@@ -135,7 +135,29 @@ against**; ~7 games a night sustains volume; the 2-way market avoids the draw, w
 results and rosters free with no key. Add NBA on Oct 20 once the pipeline has run a week.
 Soccer stays in v2 — 3-way markets, multi-league fixture assembly, and the draw confound all at once.
 
-### Designated bookmaker: **Pinnacle**, region `eu`
+### Designated bookmaker: ~~Pinnacle, region `eu`~~ -> **DraftKings, region `us`**
+
+> **Correction, 2026-09-21 (verified against the live API).** The designated
+> bookmaker is **DraftKings, region `us`**, not Pinnacle/`eu`. Two things only a
+> live call revealed:
+>
+> 1. **Pinnacle is not served on this account.** The request succeeds and returns
+>    every game with no bookmaker entry at all, so the choice was unavailable
+>    rather than merely worse.
+> 2. **The EU region is the wrong market.** Twelve of its seventeen NHL books
+>    quote **3-way h2h on regulation time**, with a Draw -- a different market
+>    from the 2-way moneyline this experiment is built on. A 3-way bet on a team
+>    *loses* when that team wins in overtime, so mixing the two would have
+>    corrupted the de-vigged consensus, tier assignment and settlement at once.
+>    `parse_odds` now filters by market width and the CLI reports what it drops.
+>
+> Every US-region book is 2-way. DraftKings is the only one covering all 33 games
+> of a live slate, at 4.28% median margin. Sharper books exist there --
+> betonlineag and lowvig at 3.17% -- but each covers about a fifth of the slate,
+> which is useless for a designated book. The cost is a softer closing line than
+> Pinnacle's, so CLV is a slightly weaker benchmark than planned; it remains the
+> best available and stays the primary metric.
+
 
 Pinnacle runs 2–3% margins against a typical 5%+, welcomes sharp money, and its closing line is the
 industry-standard CLV benchmark. Since CLV is now the primary metric, the benchmark must be the

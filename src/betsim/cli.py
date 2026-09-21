@@ -33,7 +33,7 @@ from betsim.db import connect, init_db
 from betsim.decider import Stage2Decider
 from betsim.elo import EloTable
 from betsim.forecaster import Stage1Forecaster, summarise
-from betsim.ingest import parse_events, parse_odds, parse_scores
+from betsim.ingest import market_widths, parse_events, parse_odds, parse_scores
 from betsim.ledger import arm_state, arms_in_play, verify_ledger
 from betsim.money import minor_to_units
 from betsim.nhl import NhlApiError, NhlClient, parse_club_schedule, parse_standings
@@ -41,6 +41,7 @@ from betsim.oddsapi import OddsApiClient, OddsApiError
 from betsim.prompts import load_prompt
 from betsim.settle import bet_clv, clv_by_arm, settle_open_bets
 from betsim.slate import build_game_refs, run_slate
+from betsim.sports import get_sport
 from betsim.store import (
     apply_scores,
     context_exists,
@@ -130,7 +131,13 @@ def cmd_odds(args: argparse.Namespace) -> int:
             run_id = start_run(conn, kind)
             with OddsApiClient(_api_key(), record_dir=args.record) as api:
                 payload = api.fetch_odds(args.sport, regions=args.regions, markets=MARKET)
-                games, prices = parse_odds(payload, market=MARKET)
+                spec = get_sport(args.sport)
+                games, prices = parse_odds(payload, market=MARKET, market_width=spec.market_width)
+                mixed = {
+                    b: w
+                    for b, w in market_widths(payload, market=MARKET).items()
+                    if spec.market_width not in w
+                }
                 upsert_games(conn, games)
                 closing_ids = (
                     games_starting_within(conn, args.sport, CLOSING_WINDOW)
@@ -151,6 +158,11 @@ def cmd_odds(args: argparse.Namespace) -> int:
                 )
         designated = sum(1 for p in prices if p.bookmaker == DESIGNATED_BOOKMAKER)
         print(f"{len(games)} games, {n} prices from {len({p.bookmaker for p in prices})} books")
+        if mixed:
+            print(
+                f"  skipped {len(mixed)} book(s) quoting a different market width "
+                f"(NHL is {spec.market_width}-way here): {', '.join(sorted(mixed))}"
+            )
         if not designated:
             print(f"  WARNING: no prices from {DESIGNATED_BOOKMAKER}, the designated bookmaker")
         print(f"credits remaining: {api.quota.remaining}")

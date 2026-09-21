@@ -60,7 +60,8 @@ All with bootstrap 95% CIs resampling by day.
 ## Data
 
 - Odds: The Odds API v4. Free tier is 500 credits/month. `/odds` costs markets × regions, so v1 (h2h, one region) is 1 credit per call; `/scores` with `daysFrom` costs 2; **`/events` and `/sports` are free** — use `/events` for scheduling. Read `x-requests-remaining` from response headers, record it per run, and stop with headroom before it reaches 0.
-- Designated bookmaker: **Pinnacle**, region `eu`. Lowest margin available and the industry-standard CLV benchmark; since CLV is the primary metric, the benchmark must be the sharpest line. Store every bookmaker returned, for the consensus.
+- Designated bookmaker: **DraftKings**, region `us`. Pinnacle is not served on this account (it returns games with no bookmaker entry), and the EU region quotes NHL h2h as **3-way on regulation time**, which is a different market from the 2-way moneyline. DraftKings is the only US book covering a full slate, at ~4.3% margin. Store every bookmaker returned, for the consensus.
+- **Never mix market widths.** European NHL h2h is 3-way with a Draw and settles on regulation time; North American h2h is 2-way including overtime and the shootout. A 3-way bet on a team loses when that team wins in OT. `parse_odds(market_width=...)` filters, and the slate must only ever use the sport's own width.
 - De-vig with three methods — multiplicative, power, and Shin. Report **Shin** as primary. The de-vigged consensus is the yardstick for the headline Brier comparison, and multiplicative de-vig is biased on exactly the favorite-longshot axis the tiers are built on.
 - The Odds API returns scores but doesn't grade bets; settlement is ours. Postponed or cancelled games are void (stake refunded). NHL and NBA moneylines cannot push (OT/shootout); NFL ties push and refund.
 - UTC timestamps everywhere. Decimal odds internally; convert American odds on ingest.
@@ -93,5 +94,5 @@ All with bootstrap 95% CIs resampling by day.
 ## Decisions closed (see docs/PLAN.md for the evidence)
 
 Sport: NHL (`icehockey_nhl`) from 2026-09-29, NBA (`basketball_nba`) from 2026-10-20.
-Bookmaker: Pinnacle, region `eu`. Model: `claude-opus-5` at effort `high`, k=5.
+Bookmaker: DraftKings, region `us` (verified live; Pinnacle unavailable, EU is 3-way). Model: `claude-opus-5` at effort `high`, k=5.
 Context: `api-web.nhle.com/v1/` (free, no key).

@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from betsim.config import DESIGNATED_BOOKMAKER
 from betsim.db import connect, init_db
 from betsim.ingest import parse_events, parse_odds, parse_scores
 from betsim.settlement import GameStatus
@@ -91,15 +92,17 @@ def test_latest_and_closing_prices(conn, odds_payload):
     insert_snapshots(conn, prices, captured_utc=CAPTURED)
     conn.commit()
 
-    opening = latest_prices(conn, "nhl_car_fla", bookmaker="pinnacle")
-    assert opening == pytest.approx({"home": 2.10, "away": 1.80})
-    assert closing_prices(conn, "nhl_car_fla", bookmaker="pinnacle") == {}
+    opening = latest_prices(conn, "nhl_car_fla", bookmaker=DESIGNATED_BOOKMAKER)
+    assert opening == pytest.approx({"home": 1.77, "away": 2.10})
+    assert closing_prices(conn, "nhl_car_fla", bookmaker=DESIGNATED_BOOKMAKER) == {}
 
     # A closing snapshot at a shorter price is what produces positive CLV.
     shortened = [
         replace(p, price_decimal=1.95)
         for p in prices
-        if p.game_id == "nhl_car_fla" and p.bookmaker == "pinnacle" and p.selection == "home"
+        if p.game_id == "nhl_car_fla"
+        and p.bookmaker == DESIGNATED_BOOKMAKER
+        and p.selection == "home"
     ]
     insert_snapshots(
         conn,
@@ -108,7 +111,9 @@ def test_latest_and_closing_prices(conn, odds_payload):
         closing_game_ids={"nhl_car_fla"},
     )
     conn.commit()
-    assert closing_prices(conn, "nhl_car_fla", bookmaker="pinnacle")["home"] == pytest.approx(1.95)
+    assert closing_prices(conn, "nhl_car_fla", bookmaker=DESIGNATED_BOOKMAKER)[
+        "home"
+    ] == pytest.approx(1.95)
 
 
 def test_apply_scores_writes_only_completed_games(conn, events_payload, scores_payload):
