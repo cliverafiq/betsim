@@ -281,3 +281,115 @@ def context_exists(conn: sqlite3.Connection, game_id: str, payload_hash: str) ->
         (game_id, payload_hash),
     ).fetchone()
     return row is not None
+
+
+def insert_llm_call(
+    conn: sqlite3.Connection,
+    call,
+    *,
+    stage: int,
+    created_utc: datetime | None = None,
+) -> int:
+    """Log one LLM call -- input, hash, params, raw response and outcome.
+
+    Every call is logged whether it succeeded or not. A refusal or a malformed
+    forecast is a result of the experiment, not an error to be swallowed.
+    """
+    cur = conn.execute(
+        """
+        INSERT INTO llm_calls (
+            stage, seed_idx, model_id, prompt_version, params_json, input_hash,
+            input_json, raw_response, stop_reason, created_utc, ok, error,
+            input_tokens, output_tokens
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            stage,
+            call.seed_idx,
+            call.model_id,
+            call.prompt_version,
+            json.dumps(call.params, sort_keys=True),
+            call.input_hash,
+            call.input_text,
+            call.raw_response,
+            call.stop_reason,
+            iso(created_utc or now_utc()),
+            int(call.ok),
+            call.error,
+            call.input_tokens,
+            call.output_tokens,
+        ),
+    )
+    if cur.lastrowid is None:
+        raise RuntimeError("failed to insert an llm_calls row")
+    return cur.lastrowid
+
+
+def insert_forecast(
+    conn: sqlite3.Connection,
+    game_id: str,
+    llm_call_id: int,
+    *,
+    seed_idx: int,
+    probabilities: Mapping[str, float],
+) -> int:
+    """Store one normalised blind forecast."""
+    cur = conn.execute(
+        """
+        INSERT INTO forecasts (game_id, llm_call_id, seed_idx, p_home, p_away, p_draw)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            game_id,
+            llm_call_id,
+            seed_idx,
+            probabilities["home"],
+            probabilities["away"],
+            probabilities.get("draw"),
+        ),
+    )
+    if cur.lastrowid is None:
+        raise RuntimeError("failed to insert a forecast row")
+    return cur.lastrowid
+
+
+def latest_contexts(conn: sqlite3.Connection, game_ids: Sequence[str]) -> dict[str, dict]:
+    """The most recent stored context for each game, parsed back from JSON."""
+    out: dict[str, dict] = {}
+    for game_id in game_ids:
+        row = conn.execute(
+            """
+            SELECT payload_json FROM contexts
+             WHERE game_id = ? ORDER BY id DESC LIMIT 1
+            """,
+            (game_id,),
+        ).fetchone()
+        if row is not None:
+            out[game_id] = json.loads(row["payload_json"])
+    return out
+
+
+def forecast_counts(conn: sqlite3.Connection, game_id: str) -> int:
+    """How many successful draws this game already has."""
+    row = conn.execute("SELECT COUNT(*) c FROM forecasts WHERE game_id = ?", (game_id,)).fetchone()
+    return int(row["c"])
+
+
+def llm_spend(conn: sqlite3.Connection, *, stage: int | None = None) -> dict[str, int]:
+    """Total tokens logged, so spend can be audited against the budget."""
+    clause = "WHERE stage = ?" if stage is not None else ""
+    args = (stage,) if stage is not None else ()
+    row = conn.execute(
+        f"""
+        SELECT COUNT(*) calls,
+               COALESCE(SUM(input_tokens), 0) input_tokens,
+               COALESCE(SUM(output_tokens), 0) output_tokens
+          FROM llm_calls {clause}
+        """,
+        args,
+    ).fetchone()
+    return {
+        "calls": int(row["calls"]),
+        "input_tokens": int(row["input_tokens"]),
+        "output_tokens": int(row["output_tokens"]),
+    }

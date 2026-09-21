@@ -8,6 +8,7 @@ spent. ``slate`` needs Stage 1 and Stage 2, which are M3 and M4.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sqlite3
 import sys
@@ -17,10 +18,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from betsim.config import DESIGNATED_BOOKMAKER, MARKET, REGION
+from betsim.config import DESIGNATED_BOOKMAKER, EFFORT, K_SEEDS, MARKET, MODEL_ID, REGION
 from betsim.context import build_context, context_hash, index_results_by_team, seed_elo_from_results
 from betsim.db import connect, init_db
 from betsim.elo import EloTable
+from betsim.forecaster import Stage1Forecaster, summarise
 from betsim.ingest import parse_events, parse_odds, parse_scores
 from betsim.nhl import NhlApiError, NhlClient, parse_club_schedule, parse_standings
 from betsim.oddsapi import OddsApiClient, OddsApiError
@@ -28,8 +30,13 @@ from betsim.store import (
     apply_scores,
     context_exists,
     finish_run,
+    forecast_counts,
     insert_context,
+    insert_forecast,
+    insert_llm_call,
     insert_snapshots,
+    latest_contexts,
+    llm_spend,
     save_elo_ratings,
     start_run,
     upcoming_games,
@@ -42,6 +49,7 @@ DEFAULT_SPORT = "icehockey_nhl"
 NOT_YET = {"slate": "M3/M4", "report": "M6", "calibrate": "M6"}
 PRIOR_SEASON = 20252026
 NHL_CALL_DELAY = 0.15  # be a considerate client of a free public API
+CHARS_PER_TOKEN = 4  # rough, for the dry run only
 
 
 def _api_key() -> str:
@@ -238,6 +246,73 @@ def cmd_context(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_forecast(args: argparse.Namespace) -> int:
+    """Run k blind Stage 1 draws per game. **This spends money on LLM calls.**"""
+    conn = _open_db(args.db)
+    try:
+        games = upcoming_games(conn, args.sport)
+        contexts = latest_contexts(conn, [g.id for g in games])
+        pending = [g for g in games if g.id in contexts]
+        missing = [g.id for g in games if g.id not in contexts]
+        if missing:
+            print(f"  {len(missing)} games have no context yet; run `betsim context`")
+        if not pending:
+            print("nothing to forecast")
+            return 0
+
+        forecaster = Stage1Forecaster(model=args.model, effort=args.effort)
+
+        if args.dry_run:
+            chars = sum(len(forecaster.render(contexts[g.id])) for g in pending)
+            calls = len(pending) * args.k
+            approx_in = chars * args.k // CHARS_PER_TOKEN
+            print(f"dry run: {calls} calls ({len(pending)} games x k={args.k})")
+            print(f"  ~{approx_in:,} input tokens, model {args.model} at effort {args.effort}")
+            print("  no API calls made, nothing spent")
+            return 0
+
+        run_id = start_run(conn, "forecast")
+        all_calls = []
+        with conn:
+            for game in pending:
+                have = forecast_counts(conn, game.id)
+                if have >= args.k and not args.force:
+                    continue
+                calls = forecaster.forecast_k(contexts[game.id], k=args.k)
+                all_calls.extend(calls)
+                for call in calls:
+                    call_id = insert_llm_call(conn, call, stage=1)
+                    if call.ok and call.probabilities:
+                        insert_forecast(
+                            conn,
+                            game.id,
+                            call_id,
+                            seed_idx=call.seed_idx,
+                            probabilities=call.probabilities,
+                        )
+            summary = summarise(all_calls)
+            finish_run(conn, run_id, notes=json.dumps(summary, sort_keys=True))
+
+        print(
+            f"{summary['ok']}/{summary['calls']} draws succeeded"
+            f" ({summary['failed']} failed, {summary['refusals']} refused)"
+        )
+        if "mean_p_home" in summary:
+            print(
+                f"  mean p_home {summary['mean_p_home']}, "
+                f"widest spread across draws {summary['spread_p_home']}"
+            )
+        print(f"  estimated spend ${summary['cost_usd']}")
+        total = llm_spend(conn, stage=1)
+        print(
+            f"  stage 1 to date: {total['calls']} calls, "
+            f"{total['input_tokens']:,} in / {total['output_tokens']:,} out"
+        )
+    finally:
+        conn.close()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="betsim", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -274,6 +349,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_ctx = common(sub.add_parser("context", help="build blind Stage 1 contexts (free)"))
     p_ctx.add_argument("--season", type=int, default=PRIOR_SEASON)
     p_ctx.set_defaults(func=cmd_context)
+
+    p_fc = common(sub.add_parser("forecast", help="run blind Stage 1 draws (SPENDS MONEY)"))
+    p_fc.add_argument("--k", type=int, default=K_SEEDS, help="independent draws per game")
+    p_fc.add_argument("--model", default=MODEL_ID)
+    p_fc.add_argument("--effort", default=EFFORT, choices=("low", "medium", "high", "xhigh", "max"))
+    p_fc.add_argument("--dry-run", action="store_true", help="estimate without calling the API")
+    p_fc.add_argument(
+        "--force", action="store_true", help="re-forecast games that already have draws"
+    )
+    p_fc.set_defaults(func=cmd_forecast)
 
     for name, milestone in NOT_YET.items():
         common(sub.add_parser(name, help=f"not implemented yet ({milestone})")).set_defaults(

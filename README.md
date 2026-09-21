@@ -29,9 +29,9 @@ the rules that apply to every session.
 
 ## Status
 
-**M2 complete** -- pure logic, the Odds API client, and the NHL context
-builder with the Elo baseline seeded from a real season. The LLM stages (M3/M4)
-are next. Milestones are tracked in `docs/PLAN.md`.
+**M3 complete** -- pure logic, the Odds API client, the NHL context builder
+with a seeded Elo baseline, and blind Stage 1 forecasting. Stage 2 and the
+betting arms (M4) are next. Milestones are tracked in `docs/PLAN.md`.
 
 | Module | What it does |
 |---|---|
@@ -52,12 +52,14 @@ are next. Milestones are tracked in `docs/PLAN.md`.
 | `nhl` | NHL official API client and parsing (free, no key) |
 | `teams` | Matching team names between the two feeds |
 | `context` | Blind Stage 1 context, with an allowlist leak guard |
+| `prompts` | Versioned, hashed prompt templates |
+| `forecaster` | Stage 1 blind forecasting, k independent draws |
 
 ## Developing
 
 ```bash
 uv sync                  # install
-uv run pytest            # 332 tests, no network, no API keys needed
+uv run pytest            # 360 tests, no network, no API keys needed
 uv run ruff check src tests
 uv run betsim init       # create an empty database
 ```
@@ -77,6 +79,8 @@ uv run betsim odds --closing   # closing snapshot, for CLV  (1 credit)
 uv run betsim scores           # final scores               (2 credits)
 uv run betsim seed-elo         # seed the Elo baseline      (free)
 uv run betsim context          # blind Stage 1 contexts     (free)
+uv run betsim forecast --dry-run   # estimate Stage 1, spend nothing
+uv run betsim forecast             # blind Stage 1 draws    (SPENDS MONEY)
 ```
 
 `seed-elo` and `context` use the NHL's own API, which is free and needs no key,
@@ -93,6 +97,28 @@ so move to the $30 tier at that point.
 
 The client refuses any costed call that would drop the balance below a 25-credit
 reserve, and every run records the credits remaining so the spend is auditable.
+
+### Stage 1 and the k draws
+
+Current Claude models expose **no sampling parameters** -- `temperature`,
+`top_p`, `top_k` and `budget_tokens` all return HTTP 400 on Opus 5 -- and there
+is no seed. Repeated variance therefore comes from repeated calls: `k`
+independent draws per game, all sharing one `input_hash`, which is what proves
+they were independent draws on identical input rather than `k` different
+questions. One draw cannot separate skill from luck; KellyBench's per-model seed
+spread was +34.1% to -32.9% on identical data.
+
+Every call is logged whether or not it succeeded. A refusal, a malformed
+forecast or an API failure is recorded and returned, never thrown -- rule
+violations and refusals are results, and one bad game must not take down a
+slate. `params_json` records the model, effort, thinking config and token
+ceiling, and deliberately has no `temperature` field.
+
+Measured cost, at the real rendered prompt size of ~1,000 input tokens:
+roughly **$0.03-0.06 per call**, so Stage 1 for a full NHL season at k=5 is
+about **$160-350** depending on how much the model thinks. Run
+`betsim forecast --dry-run` first -- it renders every prompt and reports the
+call count without touching the API.
 
 ### Keeping odds out of the blind stage
 

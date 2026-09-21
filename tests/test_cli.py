@@ -6,6 +6,7 @@ import pytest
 from betsim.cli import main
 from betsim.context import assert_no_odds_leak, context_hash
 from betsim.db import connect
+from betsim.forecaster import Stage1Forecaster
 from betsim.nhl import NhlClient
 from betsim.oddsapi import OddsApiClient
 
@@ -222,3 +223,133 @@ def test_context_refuses_an_unmappable_team(
     stub_nhl(monkeypatch, nhl_standings_payload, nhl_schedule_payload)
     assert main(["context", "--db", str(db)]) == 1
     assert "cannot resolve" in capsys.readouterr().err
+
+
+# --- M3: blind Stage 1 forecasting ------------------------------------------
+
+
+def _stub_forecaster(monkeypatch, *responses):
+    """Patch the CLI's forecaster to use a stub client instead of the real API."""
+    from tests.test_forecaster import StubClient
+
+    holder = {}
+
+    def factory(**kwargs):
+        client = StubClient(*responses)
+        holder["client"] = client
+        return Stage1Forecaster(client=client, **kwargs)
+
+    monkeypatch.setattr("betsim.cli.Stage1Forecaster", factory)
+    return holder
+
+
+def _prepare(tmp_path, monkeypatch, events_payload, standings_payload, schedule_payload):
+    db = tmp_path / "b.db"
+    stub_client(monkeypatch, events_payload)
+    main(["events", "--db", str(db)])
+    stub_nhl(monkeypatch, standings_payload, schedule_payload)
+    main(["context", "--db", str(db)])
+    return db
+
+
+def test_forecast_dry_run_spends_nothing(
+    tmp_path, monkeypatch, capsys, events_payload, nhl_standings_payload, nhl_schedule_payload
+):
+    db = _prepare(
+        tmp_path, monkeypatch, events_payload, nhl_standings_payload, nhl_schedule_payload
+    )
+    holder = _stub_forecaster(monkeypatch)
+    capsys.readouterr()
+    assert main(["forecast", "--db", str(db), "--k", "5", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "15 calls (3 games x k=5)" in out
+    assert "nothing spent" in out
+    assert "client" not in holder or not holder["client"].calls
+
+
+def test_forecast_stores_calls_and_forecasts(
+    tmp_path, monkeypatch, capsys, events_payload, nhl_standings_payload, nhl_schedule_payload
+):
+    from tests.test_forecaster import forecast as make_forecast
+    from tests.test_forecaster import response as make_response
+
+    db = _prepare(
+        tmp_path, monkeypatch, events_payload, nhl_standings_payload, nhl_schedule_payload
+    )
+    _stub_forecaster(monkeypatch, make_response(make_forecast(0.58, 0.42)))
+    capsys.readouterr()
+    assert main(["forecast", "--db", str(db), "--k", "3"]) == 0
+    out = capsys.readouterr().out
+    assert "9/9 draws succeeded" in out
+
+    conn = connect(db)
+    assert conn.execute("SELECT COUNT(*) c FROM llm_calls").fetchone()["c"] == 9
+    assert conn.execute("SELECT COUNT(*) c FROM forecasts").fetchone()["c"] == 9
+    call = conn.execute("SELECT * FROM llm_calls LIMIT 1").fetchone()
+    assert call["stage"] == 1
+    assert call["ok"] == 1
+    assert call["input_tokens"] == 1200
+    params = json.loads(call["params_json"])
+    assert "temperature" not in params  # no such parameter exists on these models
+    # All draws for one game share an input hash: independent draws, identical input.
+    hashes = conn.execute("SELECT COUNT(DISTINCT input_hash) c FROM llm_calls").fetchone()["c"]
+    assert hashes == 3  # one per game, not one per call
+    conn.close()
+
+
+def test_forecast_skips_games_that_already_have_draws(
+    tmp_path, monkeypatch, capsys, events_payload, nhl_standings_payload, nhl_schedule_payload
+):
+    from tests.test_forecaster import forecast as make_forecast
+    from tests.test_forecaster import response as make_response
+
+    db = _prepare(
+        tmp_path, monkeypatch, events_payload, nhl_standings_payload, nhl_schedule_payload
+    )
+    _stub_forecaster(monkeypatch, make_response(make_forecast()))
+    main(["forecast", "--db", str(db), "--k", "2"])
+    capsys.readouterr()
+    main(["forecast", "--db", str(db), "--k", "2"])
+    assert "0/0 draws" in capsys.readouterr().out
+
+    conn = connect(db)
+    assert conn.execute("SELECT COUNT(*) c FROM forecasts").fetchone()["c"] == 6
+    conn.close()
+
+
+def test_a_refusal_is_recorded_without_stopping_the_run(
+    tmp_path, monkeypatch, capsys, events_payload, nhl_standings_payload, nhl_schedule_payload
+):
+    from types import SimpleNamespace
+
+    from tests.test_forecaster import response as make_response
+
+    db = _prepare(
+        tmp_path, monkeypatch, events_payload, nhl_standings_payload, nhl_schedule_payload
+    )
+    details = SimpleNamespace(category="gambling", explanation="declined")
+    _stub_forecaster(monkeypatch, make_response(None, stop_reason="refusal", details=details))
+    capsys.readouterr()
+    assert main(["forecast", "--db", str(db), "--k", "2"]) == 0
+    assert "6 refused" in capsys.readouterr().out
+
+    conn = connect(db)
+    # Refusals are logged as calls but produce no forecasts -- they are data.
+    assert conn.execute("SELECT COUNT(*) c FROM llm_calls").fetchone()["c"] == 6
+    assert conn.execute("SELECT COUNT(*) c FROM forecasts").fetchone()["c"] == 0
+    row = conn.execute("SELECT stop_reason, error FROM llm_calls LIMIT 1").fetchone()
+    assert row["stop_reason"] == "refusal"
+    assert "gambling" in row["error"]
+    conn.close()
+
+
+def test_forecast_reports_games_without_a_context(tmp_path, monkeypatch, capsys, events_payload):
+    db = tmp_path / "b.db"
+    stub_client(monkeypatch, events_payload)
+    main(["events", "--db", str(db)])
+    _stub_forecaster(monkeypatch)
+    capsys.readouterr()
+    assert main(["forecast", "--db", str(db)]) == 0
+    out = capsys.readouterr().out
+    assert "3 games have no context yet" in out
+    assert "nothing to forecast" in out

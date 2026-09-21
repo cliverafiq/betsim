@@ -68,7 +68,9 @@ CREATE TABLE IF NOT EXISTS llm_calls (
     stop_reason    TEXT,
     created_utc    TEXT NOT NULL,
     ok             INTEGER NOT NULL,
-    error          TEXT
+    error          TEXT,
+    input_tokens   INTEGER,
+    output_tokens  INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_calls_stage ON llm_calls(stage, created_utc);
 

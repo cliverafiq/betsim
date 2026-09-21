@@ -37,6 +37,22 @@ EFFORT = "high"
 # k independent draws per slate. A single live forward path is one seed, and
 # KellyBench's per-model seed spread was +34.1% to -32.9% on identical data.
 K_SEEDS = 5
+MAX_TOKENS = 4096
+
+# USD per million tokens (input, output), for budgeting only -- the authoritative
+# spend is whatever the API reports back in usage.
+MODEL_PRICING: dict[str, tuple[float, float]] = {
+    "claude-opus-5": (5.0, 25.0),
+    "claude-sonnet-5": (2.0, 10.0),
+    "claude-haiku-4-5": (1.0, 5.0),
+}
+
+
+def estimate_cost_usd(input_tokens: int, output_tokens: int, model: str = MODEL_ID) -> float:
+    """Rough spend for one call. Thinking tokens are billed as output."""
+    rate_in, rate_out = MODEL_PRICING.get(model, MODEL_PRICING[MODEL_ID])
+    return (input_tokens * rate_in + output_tokens * rate_out) / 1_000_000
+
 
 # --- calibration ------------------------------------------------------------
 CALIBRATION_BURN_IN_GAMES = 200
