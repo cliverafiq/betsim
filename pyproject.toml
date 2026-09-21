@@ -1,0 +1,35 @@
+[project]
+name = "betsim"
+version = "0.1.0"
+description = "Paper-trading experiment testing whether an LLM can manage a hypothetical sports-betting bankroll. No real money, ever."
+readme = "README.md"
+authors = [
+    { name = "cliverafiq", email = "clive.rafiq@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "anthropic>=1.7.0",
+    "httpx>=0.28.1",
+    "pydantic>=2.13.5",
+]
+
+[project.scripts]
+betsim = "betsim.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.16,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.8",
+]

@@ -1,0 +1,18 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# betsim
+.env
+*.db
+*.db-journal
+*.db-wal
+.pytest_cache/
+.ruff_cache/
