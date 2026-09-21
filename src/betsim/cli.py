@@ -20,12 +20,14 @@ from dotenv import load_dotenv
 
 from betsim.arms import elo_probabilities
 from betsim.config import (
+    CALIBRATION_BURN_IN_GAMES,
     CLOSING_WINDOW,
     DESIGNATED_BOOKMAKER,
     EFFORT,
     K_SEEDS,
     MARKET,
     MODEL_ID,
+    PRIMARY_DEVIG_METHOD,
     REGION,
 )
 from betsim.context import build_context, context_hash, index_results_by_team, seed_elo_from_results
@@ -39,6 +41,7 @@ from betsim.money import minor_to_units
 from betsim.nhl import NhlApiError, NhlClient, parse_club_schedule, parse_standings
 from betsim.oddsapi import OddsApiClient, OddsApiError
 from betsim.prompts import load_prompt
+from betsim.report import fit_calibration, render
 from betsim.settle import bet_clv, clv_by_arm, settle_open_bets
 from betsim.slate import build_game_refs, run_slate
 from betsim.sports import get_sport
@@ -52,9 +55,11 @@ from betsim.store import (
     insert_forecast,
     insert_llm_call,
     insert_snapshots,
+    latest_calibration,
     latest_contexts,
     llm_spend,
     load_elo_ratings,
+    save_calibration,
     save_elo_ratings,
     start_run,
     upcoming_games,
@@ -64,7 +69,7 @@ from betsim.teams import TeamIndex, UnknownTeam
 
 DEFAULT_DB = Path("betsim.db")
 DEFAULT_SPORT = "icehockey_nhl"
-NOT_YET = {"report": "M6", "calibrate": "M6"}
+NOT_YET: dict[str, str] = {}
 PRIOR_SEASON = 20252026
 NHL_CALL_DELAY = 0.15  # be a considerate client of a free public API
 CHARS_PER_TOKEN = 4  # rough, for the dry run only
@@ -586,6 +591,50 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_report(args: argparse.Namespace) -> int:
+    """Metrics for every arm. Free -- derived from what is already stored."""
+    conn = _open_db(args.db)
+    try:
+        print(render(conn, method=args.devig))
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_calibrate(args: argparse.Namespace) -> int:
+    """Refit the Platt map used by `kelly_cal`. Free."""
+    conn = _open_db(args.db)
+    try:
+        params, note = fit_calibration(conn, min_games=args.burn_in)
+        if params is None:
+            print(f"not fitting: {note}")
+            existing = latest_calibration(conn)
+            if existing:
+                print(
+                    f"  existing map: a={existing['a']:.4f} b={existing['b']:.4f} "
+                    f"from {existing['n_games']} games"
+                )
+            return 0
+        with conn:
+            save_calibration(
+                conn,
+                params.to_dict(),
+                method="platt",
+                n_games=params.n,
+                valid_from_utc=datetime.now(UTC),
+            )
+        print(f"platt map {note}: a={params.a:.4f} b={params.b:.4f}")
+        if params.a < 1.0:
+            print("  a < 1: the model is overconfident and the map shrinks it toward the centre")
+        elif params.a > 1.0:
+            print("  a > 1: the model is underconfident and the map sharpens it")
+        print("  applies only to games from now on -- fitting and applying to the same")
+        print("  game would be circular and would flatter kelly_cal for no reason")
+    finally:
+        conn.close()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="betsim", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -659,6 +708,16 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_parser("doctor", help="check credentials and setup (free, prints no secrets)"),
         sport=False,
     ).set_defaults(func=cmd_doctor)
+
+    p_rep = common(sub.add_parser("report", help="metrics for every arm (free)"))
+    p_rep.add_argument(
+        "--devig", default=PRIMARY_DEVIG_METHOD, choices=("multiplicative", "power", "shin")
+    )
+    p_rep.set_defaults(func=cmd_report)
+
+    p_cal = common(sub.add_parser("calibrate", help="refit the kelly_cal map (free)"), sport=False)
+    p_cal.add_argument("--burn-in", type=int, default=CALIBRATION_BURN_IN_GAMES)
+    p_cal.set_defaults(func=cmd_calibrate)
 
     for name, milestone in NOT_YET.items():
         common(sub.add_parser(name, help=f"not implemented yet ({milestone})")).set_defaults(

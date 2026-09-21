@@ -562,3 +562,51 @@ def open_bets_for_settlement(conn: sqlite3.Connection, sport_key: str):
         """,
         (sport_key,),
     ).fetchall()
+
+
+def save_calibration(
+    conn: sqlite3.Connection,
+    params: Mapping[str, object],
+    *,
+    method: str,
+    n_games: int,
+    valid_from_utc: datetime,
+    fitted_utc: datetime | None = None,
+) -> int:
+    """Store a calibration map with the point from which it may be applied.
+
+    ``valid_from_utc`` is what keeps the arm honest: a map fitted on a game and
+    then applied to that same game is circular.
+    """
+    cur = conn.execute(
+        """
+        INSERT INTO calibrations (fitted_utc, method, params_json, n_games, valid_from_utc)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            iso(fitted_utc or now_utc()),
+            method,
+            json.dumps(dict(params), sort_keys=True),
+            n_games,
+            iso(valid_from_utc),
+        ),
+    )
+    if cur.lastrowid is None:
+        raise RuntimeError("failed to insert a calibration row")
+    return cur.lastrowid
+
+
+def latest_calibration(conn: sqlite3.Connection, *, method: str = "platt") -> dict | None:
+    """The most recent calibration map for a method, or None if never fitted."""
+    row = conn.execute(
+        "SELECT params_json, n_games, valid_from_utc FROM calibrations "
+        "WHERE method = ? ORDER BY id DESC LIMIT 1",
+        (method,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        **json.loads(row["params_json"]),
+        "n_games": row["n_games"],
+        "valid_from_utc": row["valid_from_utc"],
+    }

@@ -43,9 +43,35 @@ def test_init_creates_the_database(tmp_path, capsys):
     assert "initialised" in capsys.readouterr().out
 
 
-def test_unimplemented_commands_say_which_milestone(tmp_path, capsys):
-    assert main(["report", "--db", str(tmp_path / "b.db")]) == 2
-    assert "M6" in capsys.readouterr().err
+def test_every_advertised_command_is_wired(tmp_path):
+    from betsim.cli import build_parser
+
+    parser = build_parser()
+    actions = [a for a in parser._actions if a.choices and "init" in (a.choices or {})]
+    assert actions, "expected a subparser action"
+    commands = sorted(actions[0].choices)
+    assert commands == sorted(
+        [
+            "calibrate",
+            "clv",
+            "close",
+            "context",
+            "doctor",
+            "events",
+            "forecast",
+            "init",
+            "odds",
+            "quota",
+            "report",
+            "scores",
+            "seed-elo",
+            "settle",
+            "slate",
+        ]
+    )
+    # Nothing is left as a not-implemented stub.
+    for name, sub in actions[0].choices.items():
+        assert sub.get_default("func") is not None, f"{name} has no handler"
 
 
 def test_missing_api_key_gives_a_useful_message(monkeypatch):

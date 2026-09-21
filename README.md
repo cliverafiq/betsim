@@ -29,10 +29,13 @@ the rules that apply to every session.
 
 ## Status
 
-**M5 complete** -- the loop closes. Everything above, plus closing
-snapshots, settlement into the ledger, and CLV. The system can now run a full
-day unattended. Reporting and calibration (M6) are next. Milestones are tracked
-in `docs/PLAN.md`.
+**M6 complete -- the build is done.** Every milestone in `docs/PLAN.md` has
+landed: both API clients, the blind context, Stage 1 and Stage 2, the validator,
+an append-only ledger, every shadow arm, settlement, CLV, reporting and
+calibration. The predictions, thresholds and frozen parameters are committed in
+[`PREREGISTRATION.md`](PREREGISTRATION.md) and tagged `prereg-v1`.
+
+First live slate: **NHL opening night, 2026-09-29**.
 
 | Module | What it does |
 |---|---|
@@ -61,12 +64,14 @@ in `docs/PLAN.md`.
 | `ledger` | Append-only bankroll accounting |
 | `slate` | The daily loop across every arm |
 | `settle` | Grading into the ledger, and CLV |
+| `calibrate` | Platt scaling for the `kelly_cal` arm |
+| `report` | Metrics, calibration curves and bootstrap intervals |
 
 ## Developing
 
 ```bash
 uv sync                  # install
-uv run pytest            # 440 tests, no network, no API keys needed
+uv run pytest            # 467 tests, no network, no API keys needed
 uv run ruff check src tests
 uv run betsim init       # create an empty database
 ```
@@ -106,6 +111,8 @@ uv run betsim close                # closing snapshot       (1 credit)
 uv run betsim settle               # score, grade, settle   (2 credits)
 uv run betsim clv                  # closing line value     (free)
 uv run betsim doctor               # check setup and keys   (free)
+uv run betsim report               # metrics for every arm  (free)
+uv run betsim calibrate            # refit the kelly_cal map (free)
 ```
 
 A full day is `odds` -> `context` -> `forecast` -> `slate` -> `close` (near each
@@ -174,6 +181,19 @@ The ledger is append-only. Placing appends a negative row, settling appends a
 positive one, and a **loss appends a zero-delta row** so every settled bet leaves
 exactly two rows and settlement is never inferred from a missing one.
 `verify_ledger` re-derives the running balance and runs after every slate.
+
+### Calibration
+
+The documented LLM failure in forecasting is **overconfidence on
+high-probability events**. That is correctable after the fact, so rather than
+assume the forecasts are beyond help, `kelly_cal` stakes Platt-scaled
+probabilities under the same rule as `kelly`. If it wins, the forecasts carry
+signal the model's own confidence is destroying.
+
+The map is fitted by IRLS in plain Python, after a 200-game burn-in, and is
+**strictly out-of-sample**: `valid_from_utc` records the point past which it may
+be applied, because fitting on a game and then applying to that same game is
+circular and would flatter the arm for nothing.
 
 ### Market width: NHL is two different markets
 
