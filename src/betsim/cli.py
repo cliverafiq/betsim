@@ -18,14 +18,19 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from betsim.arms import elo_probabilities
 from betsim.config import DESIGNATED_BOOKMAKER, EFFORT, K_SEEDS, MARKET, MODEL_ID, REGION
 from betsim.context import build_context, context_hash, index_results_by_team, seed_elo_from_results
 from betsim.db import connect, init_db
+from betsim.decider import Stage2Decider
 from betsim.elo import EloTable
 from betsim.forecaster import Stage1Forecaster, summarise
 from betsim.ingest import parse_events, parse_odds, parse_scores
+from betsim.ledger import arm_state, arms_in_play, verify_ledger
+from betsim.money import minor_to_units
 from betsim.nhl import NhlApiError, NhlClient, parse_club_schedule, parse_standings
 from betsim.oddsapi import OddsApiClient, OddsApiError
+from betsim.slate import build_game_refs, run_slate
 from betsim.store import (
     apply_scores,
     context_exists,
@@ -37,6 +42,7 @@ from betsim.store import (
     insert_snapshots,
     latest_contexts,
     llm_spend,
+    load_elo_ratings,
     save_elo_ratings,
     start_run,
     upcoming_games,
@@ -46,7 +52,7 @@ from betsim.teams import TeamIndex, UnknownTeam
 
 DEFAULT_DB = Path("betsim.db")
 DEFAULT_SPORT = "icehockey_nhl"
-NOT_YET = {"slate": "M3/M4", "report": "M6", "calibrate": "M6"}
+NOT_YET = {"report": "M6", "calibrate": "M6"}
 PRIOR_SEASON = 20252026
 NHL_CALL_DELAY = 0.15  # be a considerate client of a free public API
 CHARS_PER_TOKEN = 4  # rough, for the dry run only
@@ -313,6 +319,88 @@ def cmd_forecast(args: argparse.Namespace) -> int:
     return 0
 
 
+def _elo_probabilities(conn, refs) -> dict:
+    """Elo win probabilities, using the tricodes already stored in each context."""
+    ratings = load_elo_ratings(conn)
+    if not ratings:
+        return {}
+    table = EloTable()
+    table.ratings.update(ratings)
+    contexts = latest_contexts(conn, [r.game_id for r in refs])
+    pairs = {
+        gid: (ctx["home"]["tricode"], ctx["away"]["tricode"])
+        for gid, ctx in contexts.items()
+        if "home" in ctx and "away" in ctx
+    }
+    return elo_probabilities(refs, table, pairs)
+
+
+def cmd_slate(args: argparse.Namespace) -> int:
+    """Run the daily loop across every arm. Spends money unless --dry-run."""
+    conn = _open_db(args.db)
+    try:
+        games = upcoming_games(conn, args.sport)
+        refs = build_game_refs(conn, games)
+        if not refs:
+            print("no games with designated-bookmaker prices; run `betsim odds` first")
+            return 0
+
+        decider = None if args.dry_run else Stage2Decider(model=args.model, effort=args.effort)
+        if args.dry_run:
+            print(f"dry run: {len(refs)} games, shadow arms only, no LLM calls")
+
+        run_id = start_run(conn, "slate")
+        with conn:
+            result = run_slate(
+                conn,
+                sport=args.sport,
+                decider=decider,
+                k=args.k,
+                elo_probs=_elo_probabilities(conn, refs),
+                random_seed=args.seed,
+            )
+            finish_run(
+                conn,
+                run_id,
+                notes=json.dumps(
+                    {
+                        "games": result.games,
+                        "placed": result.placed,
+                        "cost_usd": round(result.cost_usd, 4),
+                    },
+                    sort_keys=True,
+                ),
+            )
+
+        print(f"{result.games} games, k={result.seeds}")
+        for arm in sorted(result.placed):
+            staked = minor_to_units(result.staked_minor.get(arm, 0))
+            state = arm_state(conn, arm)
+            print(
+                f"  {arm:20} {result.placed[arm]:2} bets  {staked:7.2f} u staked  "
+                f"balance {minor_to_units(state.balance_minor):8.2f} u"
+                f"{'  BUST' if state.bust else ''}"
+            )
+        if result.rejected:
+            print(
+                "  rejections: " + ", ".join(f"{k}={v}" for k, v in sorted(result.rejected.items()))
+            )
+        for note in result.notes:
+            print(f"  note: {note}")
+        if not args.dry_run:
+            print(
+                f"  estimated spend ${result.cost_usd:.4f}"
+                f"{f', {result.refusals} refusals' if result.refusals else ''}"
+            )
+
+        for arm in arms_in_play(conn):
+            verify_ledger(conn, arm)
+        print("  ledger verified")
+    finally:
+        conn.close()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="betsim", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -359,6 +447,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--force", action="store_true", help="re-forecast games that already have draws"
     )
     p_fc.set_defaults(func=cmd_forecast)
+
+    p_sl = common(sub.add_parser("slate", help="run the daily loop across every arm"))
+    p_sl.add_argument("--k", type=int, default=K_SEEDS)
+    p_sl.add_argument("--model", default=MODEL_ID)
+    p_sl.add_argument("--effort", default=EFFORT, choices=("low", "medium", "high", "xhigh", "max"))
+    p_sl.add_argument("--seed", type=int, default=0, help="seed for the random arm")
+    p_sl.add_argument("--dry-run", action="store_true", help="shadow arms only, no LLM calls")
+    p_sl.set_defaults(func=cmd_slate)
 
     for name, milestone in NOT_YET.items():
         common(sub.add_parser(name, help=f"not implemented yet ({milestone})")).set_defaults(

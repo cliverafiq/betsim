@@ -29,9 +29,10 @@ the rules that apply to every session.
 
 ## Status
 
-**M3 complete** -- pure logic, the Odds API client, the NHL context builder
-with a seeded Elo baseline, and blind Stage 1 forecasting. Stage 2 and the
-betting arms (M4) are next. Milestones are tracked in `docs/PLAN.md`.
+**M4 complete** -- the experiment now places bets. Pure logic, both API
+clients, the blind context, Stage 1 and Stage 2, the validator, an append-only
+ledger and every shadow arm. Closing snapshots and settlement (M5) are next.
+Milestones are tracked in `docs/PLAN.md`.
 
 | Module | What it does |
 |---|---|
@@ -54,12 +55,17 @@ betting arms (M4) are next. Milestones are tracked in `docs/PLAN.md`.
 | `context` | Blind Stage 1 context, with an allowlist leak guard |
 | `prompts` | Versioned, hashed prompt templates |
 | `forecaster` | Stage 1 blind forecasting, k independent draws |
+| `llmcall` | Shared structured-output call plumbing |
+| `decider` | Stage 2 priced decisions |
+| `arms` | Kelly, Elo, favourite and random shadow arms |
+| `ledger` | Append-only bankroll accounting |
+| `slate` | The daily loop across every arm |
 
 ## Developing
 
 ```bash
 uv sync                  # install
-uv run pytest            # 360 tests, no network, no API keys needed
+uv run pytest            # 417 tests, no network, no API keys needed
 uv run ruff check src tests
 uv run betsim init       # create an empty database
 ```
@@ -81,6 +87,8 @@ uv run betsim seed-elo         # seed the Elo baseline      (free)
 uv run betsim context          # blind Stage 1 contexts     (free)
 uv run betsim forecast --dry-run   # estimate Stage 1, spend nothing
 uv run betsim forecast             # blind Stage 1 draws    (SPENDS MONEY)
+uv run betsim slate --dry-run      # shadow arms only, no LLM calls
+uv run betsim slate                # the full daily loop    (SPENDS MONEY)
 ```
 
 `seed-elo` and `context` use the NHL's own API, which is free and needs no key,
@@ -119,6 +127,32 @@ roughly **$0.03-0.06 per call**, so Stage 1 for a full NHL season at k=5 is
 about **$160-350** depending on how much the model thinks. Run
 `betsim forecast --dry-run` first -- it renders every prompt and reports the
 call count without touching the API.
+
+### The arms
+
+Every arm is built from the **same** price snapshot, which is what makes
+comparing them mean anything. The pairing matters too: seed *i*'s Stage 2 sees
+seed *i*'s blind forecast and nothing else, and `kelly_si` stakes that same
+forecast under a fixed rule -- so `llm_si` versus `kelly_si` reads on bet sizing
+alone, holding the forecast constant.
+
+| Arm | Probabilities | Sizing |
+|---|---|---|
+| `llm_s1..k` | — (Stage 2 decides) | Stage 2, after validation |
+| `kelly_s1..k` | `p_blind` from draw *i* | quarter Kelly, same caps |
+| `kelly_revised_s1..k` | `p_revised` | quarter Kelly, same caps |
+| `elo` | Elo + home ice | quarter Kelly, same caps |
+| `fav` | — | flat 10 units on the favourite |
+| `random` | — | flat 10 units, seeded |
+
+`fav` and `random` are exempt from **both** the tier and exposure caps: they are
+reference lines, not managed bankrolls. `random` is also the null distribution
+for CLV, since it bets at the same snapshots with no skill.
+
+The ledger is append-only. Placing appends a negative row, settling appends a
+positive one, and a **loss appends a zero-delta row** so every settled bet leaves
+exactly two rows and settlement is never inferred from a missing one.
+`verify_ledger` re-derives the running balance and runs after every slate.
 
 ### Keeping odds out of the blind stage
 

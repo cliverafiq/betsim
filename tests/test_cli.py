@@ -6,7 +6,11 @@ import pytest
 from betsim.cli import main
 from betsim.context import assert_no_odds_leak, context_hash
 from betsim.db import connect
+from betsim.decider import Stage2Decider
 from betsim.forecaster import Stage1Forecaster
+from betsim.ledger import balance, verify_ledger
+from betsim.models import Stage2Bet, Stage2Decision
+from betsim.money import STARTING_BALANCE_MINOR
 from betsim.nhl import NhlClient
 from betsim.oddsapi import OddsApiClient
 
@@ -38,8 +42,8 @@ def test_init_creates_the_database(tmp_path, capsys):
 
 
 def test_unimplemented_commands_say_which_milestone(tmp_path, capsys):
-    assert main(["slate", "--db", str(tmp_path / "b.db")]) == 2
-    assert "M3/M4" in capsys.readouterr().err
+    assert main(["report", "--db", str(tmp_path / "b.db")]) == 2
+    assert "M6" in capsys.readouterr().err
 
 
 def test_missing_api_key_gives_a_useful_message(monkeypatch):
@@ -353,3 +357,259 @@ def test_forecast_reports_games_without_a_context(tmp_path, monkeypatch, capsys,
     out = capsys.readouterr().out
     assert "3 games have no context yet" in out
     assert "nothing to forecast" in out
+
+
+# --- M4: the full daily loop ------------------------------------------------
+
+
+def _full_pipeline(
+    tmp_path, monkeypatch, events_payload, odds_payload, standings_payload, schedule_payload, *, k=2
+):
+    """events -> odds -> context -> seed-elo -> forecast, ready for a slate."""
+    from tests.test_forecaster import forecast as make_forecast
+    from tests.test_forecaster import response as make_response
+
+    db = tmp_path / "b.db"
+    stub_client(monkeypatch, events_payload)
+    main(["events", "--db", str(db)])
+    stub_client(monkeypatch, odds_payload)
+    main(["odds", "--db", str(db)])
+    stub_nhl(monkeypatch, standings_payload, schedule_payload)
+    main(["context", "--db", str(db)])
+    main(["seed-elo", "--db", str(db)])
+    _stub_forecaster(monkeypatch, make_response(make_forecast(0.62, 0.38)))
+    main(["forecast", "--db", str(db), "--k", str(k)])
+    return db
+
+
+def _stub_decider(monkeypatch, *responses):
+    from tests.test_decider import StubClient as DeciderStub
+
+    def factory(**kwargs):
+        return Stage2Decider(client=DeciderStub(*responses), **kwargs)
+
+    monkeypatch.setattr("betsim.cli.Stage2Decider", factory)
+
+
+def test_dry_run_slate_places_the_shadow_arms_without_spending(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    events_payload,
+    odds_payload,
+    nhl_standings_payload,
+    nhl_schedule_payload,
+):
+    db = _full_pipeline(
+        tmp_path,
+        monkeypatch,
+        events_payload,
+        odds_payload,
+        nhl_standings_payload,
+        nhl_schedule_payload,
+    )
+    capsys.readouterr()
+    assert main(["slate", "--db", str(db), "--k", "2", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "shadow arms only, no LLM calls" in out
+    assert "ledger verified" in out
+
+    conn = connect(db)
+    arms = {r["arm"] for r in conn.execute("SELECT DISTINCT arm FROM bets").fetchall()}
+    # Every non-LLM arm runs off the same snapshot.
+    assert {"kelly_s1", "kelly_s2", "elo", "fav", "random"} <= arms
+    assert not any(a.startswith("llm_") for a in arms)
+    conn.close()
+
+
+def test_full_slate_runs_every_arm_and_the_ledger_balances(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    events_payload,
+    odds_payload,
+    nhl_standings_payload,
+    nhl_schedule_payload,
+):
+    from tests.test_decider import response as decider_response
+
+    db = _full_pipeline(
+        tmp_path,
+        monkeypatch,
+        events_payload,
+        odds_payload,
+        nhl_standings_payload,
+        nhl_schedule_payload,
+    )
+    decision = Stage2Decision(
+        bets=[
+            Stage2Bet(
+                game_id="nhl_car_fla",
+                selection="home",
+                stake_units=15.0,
+                p_revised=0.60,
+                reason="rest edge",
+            )
+        ],
+        day_notes="one bet",
+    )
+    _stub_decider(monkeypatch, decider_response(decision))
+    capsys.readouterr()
+    assert main(["slate", "--db", str(db), "--k", "2"]) == 0
+    out = capsys.readouterr().out
+    assert "ledger verified" in out
+
+    conn = connect(db)
+    arms = {r["arm"] for r in conn.execute("SELECT DISTINCT arm FROM bets").fetchall()}
+    assert {"llm_s1", "llm_s2", "kelly_s1", "kelly_s2", "elo", "fav", "random"} <= arms
+    # p_revised was captured, so the anchoring arm ran too.
+    assert {"kelly_revised_s1", "kelly_revised_s2"} <= arms
+
+    # Money conservation, per arm: balance == opening - staked + payouts.
+    for arm in sorted(arms):
+        verify_ledger(conn, arm)
+        staked = conn.execute(
+            "SELECT COALESCE(SUM(stake_minor),0) s FROM bets WHERE arm=?", (arm,)
+        ).fetchone()["s"]
+        assert balance(conn, arm) == STARTING_BALANCE_MINOR - staked
+
+    # Stage 2 calls are logged alongside Stage 1.
+    assert conn.execute("SELECT COUNT(*) c FROM llm_calls WHERE stage=2").fetchone()["c"] == 2
+    conn.close()
+
+
+def test_llm_and_kelly_arms_see_the_same_forecast(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    events_payload,
+    odds_payload,
+    nhl_standings_payload,
+    nhl_schedule_payload,
+):
+    # The whole decomposition depends on this pairing: llm_s1 versus kelly_s1 is
+    # a read on sizing alone, holding the forecast constant.
+    from tests.test_decider import response as decider_response
+
+    db = _full_pipeline(
+        tmp_path,
+        monkeypatch,
+        events_payload,
+        odds_payload,
+        nhl_standings_payload,
+        nhl_schedule_payload,
+        k=1,
+    )
+    decision = Stage2Decision(
+        bets=[
+            Stage2Bet(
+                game_id="nhl_car_fla",
+                selection="home",
+                stake_units=15.0,
+                p_revised=0.60,
+                reason="x",
+            )
+        ]
+    )
+    _stub_decider(monkeypatch, decider_response(decision))
+    main(["slate", "--db", str(db), "--k", "1"])
+
+    conn = connect(db)
+    llm = conn.execute(
+        "SELECT p_blind FROM bets WHERE arm='llm_s1' AND game_id='nhl_car_fla'"
+    ).fetchone()
+    kelly = conn.execute(
+        "SELECT p_blind FROM bets WHERE arm='kelly_s1' AND game_id='nhl_car_fla'"
+    ).fetchone()
+    assert llm["p_blind"] == kelly["p_blind"] == pytest.approx(0.62)
+    conn.close()
+
+
+def test_an_over_cap_bet_is_rejected_and_recorded(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    events_payload,
+    odds_payload,
+    nhl_standings_payload,
+    nhl_schedule_payload,
+):
+    from tests.test_decider import response as decider_response
+
+    db = _full_pipeline(
+        tmp_path,
+        monkeypatch,
+        events_payload,
+        odds_payload,
+        nhl_standings_payload,
+        nhl_schedule_payload,
+        k=1,
+    )
+    # 500 units is far above any tier cap; it must be rejected, never clipped.
+    decision = Stage2Decision(
+        bets=[
+            Stage2Bet(
+                game_id="nhl_car_fla",
+                selection="home",
+                stake_units=500.0,
+                p_revised=0.60,
+                reason="oversized",
+            )
+        ]
+    )
+    _stub_decider(monkeypatch, decider_response(decision))
+    capsys.readouterr()
+    main(["slate", "--db", str(db), "--k", "1"])
+    assert "stake_exceeds_tier_cap" in capsys.readouterr().out
+
+    conn = connect(db)
+    assert conn.execute("SELECT COUNT(*) c FROM bets WHERE arm='llm_s1'").fetchone()["c"] == 0
+    row = conn.execute("SELECT * FROM rejections WHERE arm='llm_s1'").fetchone()
+    assert row["reason"] == "stake_exceeds_tier_cap"
+    assert json.loads(row["payload_json"])["stake_units"] == 500.0
+    conn.close()
+
+
+def test_a_stage2_refusal_leaves_the_shadow_arms_running(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    events_payload,
+    odds_payload,
+    nhl_standings_payload,
+    nhl_schedule_payload,
+):
+    from types import SimpleNamespace
+
+    from tests.test_decider import response as decider_response
+
+    db = _full_pipeline(
+        tmp_path,
+        monkeypatch,
+        events_payload,
+        odds_payload,
+        nhl_standings_payload,
+        nhl_schedule_payload,
+        k=1,
+    )
+    details = SimpleNamespace(category="gambling", explanation="declined")
+    _stub_decider(monkeypatch, decider_response(None, stop_reason="refusal", details=details))
+    capsys.readouterr()
+    assert main(["slate", "--db", str(db), "--k", "1"]) == 0
+    assert "refusals" in capsys.readouterr().out
+
+    conn = connect(db)
+    assert conn.execute("SELECT COUNT(*) c FROM bets WHERE arm='llm_s1'").fetchone()["c"] == 0
+    # The baselines are unaffected -- one refusal must not lose the night's data.
+    assert conn.execute("SELECT COUNT(*) c FROM bets WHERE arm='kelly_s1'").fetchone()["c"] > 0
+    assert conn.execute("SELECT COUNT(*) c FROM bets WHERE arm='fav'").fetchone()["c"] == 3
+    conn.close()
+
+
+def test_slate_without_prices_says_what_to_run(tmp_path, monkeypatch, capsys, events_payload):
+    db = tmp_path / "b.db"
+    stub_client(monkeypatch, events_payload)
+    main(["events", "--db", str(db)])
+    capsys.readouterr()
+    assert main(["slate", "--db", str(db)]) == 0
+    assert "run `betsim odds` first" in capsys.readouterr().out

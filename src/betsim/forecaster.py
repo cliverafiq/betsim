@@ -30,6 +30,7 @@ import anthropic
 
 from betsim.config import EFFORT, K_SEEDS, MAX_TOKENS, MODEL_ID, estimate_cost_usd
 from betsim.context import assert_no_odds_leak
+from betsim.llmcall import invoke_parse
 from betsim.models import ForecastSumError, Stage1Forecast, normalize_probabilities
 from betsim.prompts import load_prompt
 
@@ -129,52 +130,29 @@ class Stage1Forecaster:
             "input_text": text,
         }
 
-        try:
-            response = self.client.messages.parse(
-                model=self.model,
-                max_tokens=self.max_tokens,
-                thinking={"type": "adaptive"},
-                output_config={"effort": self.effort},
-                messages=[{"role": "user", "content": text}],
-                output_format=Stage1Forecast,
-            )
-        except anthropic.APIError as exc:
-            return ForecastCall(**base, ok=False, error=f"{type(exc).__name__}: {exc}")
-
-        usage = getattr(response, "usage", None)
+        result = invoke_parse(
+            self.client,
+            model=self.model,
+            max_tokens=self.max_tokens,
+            effort=self.effort,
+            text=text,
+            output_format=Stage1Forecast,
+        )
         tokens = {
-            "input_tokens": getattr(usage, "input_tokens", None),
-            "output_tokens": getattr(usage, "output_tokens", None),
+            "input_tokens": result.input_tokens,
+            "output_tokens": result.output_tokens,
         }
-        stop_reason = getattr(response, "stop_reason", None)
-        raw = _serialise(response)
-
-        # A refusal is a logged outcome, not a crash. Gambling-adjacent prompts
-        # make this non-hypothetical, and a nightly run must survive one.
-        if stop_reason == "refusal":
-            details = getattr(response, "stop_details", None)
-            category = getattr(details, "category", None)
-            explanation = getattr(details, "explanation", "")
+        if not result.ok:
             return ForecastCall(
                 **base,
                 **tokens,
                 ok=False,
-                stop_reason=stop_reason,
-                raw_response=raw,
-                error=f"refusal (category={category}): {explanation}",
+                stop_reason=result.stop_reason,
+                raw_response=result.raw_response,
+                error=result.error,
             )
 
-        parsed = getattr(response, "parsed_output", None)
-        if parsed is None:
-            return ForecastCall(
-                **base,
-                **tokens,
-                ok=False,
-                stop_reason=stop_reason,
-                raw_response=raw,
-                error=f"no parsed output (stop_reason={stop_reason})",
-            )
-
+        parsed = result.parsed
         try:
             probabilities = normalize_probabilities(parsed.probabilities())
         except ForecastSumError as exc:
@@ -182,8 +160,8 @@ class Stage1Forecaster:
                 **base,
                 **tokens,
                 ok=False,
-                stop_reason=stop_reason,
-                raw_response=raw,
+                stop_reason=result.stop_reason,
+                raw_response=result.raw_response,
                 forecast=parsed,
                 error=f"unnormalisable forecast: {exc}",
             )
@@ -192,8 +170,8 @@ class Stage1Forecaster:
             **base,
             **tokens,
             ok=True,
-            stop_reason=stop_reason,
-            raw_response=raw,
+            stop_reason=result.stop_reason,
+            raw_response=result.raw_response,
             forecast=parsed,
             probabilities=probabilities,
         )
@@ -208,18 +186,6 @@ class Stage1Forecaster:
         if k < 1:
             raise ValueError(f"k must be at least 1, got {k}")
         return [self.forecast(context, seed_idx=i) for i in range(k)]
-
-
-def _serialise(response: Any) -> str:
-    """Best-effort JSON of the raw response, for the audit log."""
-    for attr in ("model_dump_json", "to_json"):
-        method = getattr(response, attr, None)
-        if callable(method):
-            try:
-                return str(method())
-            except (TypeError, ValueError):
-                continue
-    return repr(response)
 
 
 def summarise(calls: list[ForecastCall]) -> dict[str, Any]:

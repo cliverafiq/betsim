@@ -393,3 +393,122 @@ def llm_spend(conn: sqlite3.Connection, *, stage: int | None = None) -> dict[str
         "input_tokens": int(row["input_tokens"]),
         "output_tokens": int(row["output_tokens"]),
     }
+
+
+def slate_prices(
+    conn: sqlite3.Connection,
+    game_ids: Sequence[str],
+    *,
+    bookmaker: str,
+    market: str = "h2h",
+) -> dict[str, tuple[datetime, dict[str, float]]]:
+    """Latest price snapshot per game at one bookmaker.
+
+    Returns ``{game_id: (captured_utc, {outcome: price})}``. Only the most recent
+    capture is used -- an older one would fail the validator's staleness check.
+    """
+    if not game_ids:
+        return {}
+    placeholders = ",".join("?" * len(game_ids))
+    rows = conn.execute(
+        f"""
+        SELECT game_id, captured_utc, outcome, price_decimal
+          FROM odds_snapshots
+         WHERE bookmaker = ? AND market = ? AND game_id IN ({placeholders})
+         ORDER BY captured_utc ASC
+        """,
+        (bookmaker, market, *game_ids),
+    ).fetchall()
+
+    latest: dict[str, tuple[datetime, dict[str, float]]] = {}
+    for row in rows:
+        captured = datetime.fromisoformat(row["captured_utc"])
+        current = latest.get(row["game_id"])
+        if current is None or captured > current[0]:
+            latest[row["game_id"]] = (captured, {})
+        elif captured < current[0]:
+            continue
+        latest[row["game_id"]][1][row["outcome"]] = float(row["price_decimal"])
+    return latest
+
+
+def forecasts_by_seed(
+    conn: sqlite3.Connection, game_ids: Sequence[str]
+) -> dict[int, dict[str, dict[str, float]]]:
+    """Blind forecasts grouped by draw index: ``{seed: {game_id: {outcome: p}}}``."""
+    if not game_ids:
+        return {}
+    placeholders = ",".join("?" * len(game_ids))
+    rows = conn.execute(
+        f"""
+        SELECT game_id, seed_idx, p_home, p_away, p_draw, id
+          FROM forecasts WHERE game_id IN ({placeholders}) ORDER BY id ASC
+        """,
+        tuple(game_ids),
+    ).fetchall()
+    out: dict[int, dict[str, dict[str, float]]] = {}
+    for row in rows:
+        probs = {"home": float(row["p_home"]), "away": float(row["p_away"])}
+        if row["p_draw"] is not None:
+            probs["draw"] = float(row["p_draw"])
+        out.setdefault(int(row["seed_idx"]), {})[row["game_id"]] = probs
+    return out
+
+
+def forecast_ids_by_seed(
+    conn: sqlite3.Connection, game_ids: Sequence[str]
+) -> dict[int, dict[str, int]]:
+    """Row ids of the stored forecasts, so bets can point back at what drove them."""
+    if not game_ids:
+        return {}
+    placeholders = ",".join("?" * len(game_ids))
+    rows = conn.execute(
+        f"SELECT id, game_id, seed_idx FROM forecasts WHERE game_id IN ({placeholders})",
+        tuple(game_ids),
+    ).fetchall()
+    out: dict[int, dict[str, int]] = {}
+    for row in rows:
+        out.setdefault(int(row["seed_idx"]), {})[row["game_id"]] = int(row["id"])
+    return out
+
+
+def game_teams(conn: sqlite3.Connection, game_ids: Sequence[str]) -> dict[str, tuple[str, str]]:
+    if not game_ids:
+        return {}
+    placeholders = ",".join("?" * len(game_ids))
+    rows = conn.execute(
+        f"SELECT id, home, away FROM games WHERE id IN ({placeholders})", tuple(game_ids)
+    ).fetchall()
+    return {r["id"]: (r["home"], r["away"]) for r in rows}
+
+
+def insert_rejection(
+    conn: sqlite3.Connection,
+    arm: str,
+    rejected,
+    *,
+    llm_call_id: int | None = None,
+    created_utc: datetime | None = None,
+) -> None:
+    """Record a rejected bet. Rule violations are data, not noise."""
+    conn.execute(
+        """
+        INSERT INTO rejections (arm, llm_call_id, payload_json, reason, detail, created_utc)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            arm,
+            llm_call_id,
+            json.dumps(
+                {
+                    "game_id": rejected.proposal.game_id,
+                    "selection": rejected.proposal.selection,
+                    "stake_units": rejected.proposal.stake_units,
+                },
+                sort_keys=True,
+            ),
+            str(rejected.reason),
+            rejected.detail,
+            iso(created_utc or now_utc()),
+        ),
+    )
