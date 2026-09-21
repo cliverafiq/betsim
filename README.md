@@ -29,8 +29,9 @@ the rules that apply to every session.
 
 ## Status
 
-**M1 complete** -- the pure logic, plus the Odds API client and ingestion.
-Milestones are tracked in `docs/PLAN.md`.
+**M2 complete** -- pure logic, the Odds API client, and the NHL context
+builder with the Elo baseline seeded from a real season. The LLM stages (M3/M4)
+are next. Milestones are tracked in `docs/PLAN.md`.
 
 | Module | What it does |
 |---|---|
@@ -47,13 +48,16 @@ Milestones are tracked in `docs/PLAN.md`.
 | `db` | SQLite schema; the ledger is append-only |
 | `oddsapi` | The Odds API v4 client, credit accounting, fixture recording |
 | `ingest` | Parsing API payloads into domain objects |
-| `store` | Persisting games, snapshots, scores and run credit spend |
+| `store` | Persisting games, snapshots, scores, contexts and credit spend |
+| `nhl` | NHL official API client and parsing (free, no key) |
+| `teams` | Matching team names between the two feeds |
+| `context` | Blind Stage 1 context, with an allowlist leak guard |
 
 ## Developing
 
 ```bash
 uv sync                  # install
-uv run pytest            # 267 tests, no network, no API keys needed
+uv run pytest            # 332 tests, no network, no API keys needed
 uv run ruff check src tests
 uv run betsim init       # create an empty database
 ```
@@ -71,7 +75,12 @@ uv run betsim events           # fetch the NHL schedule     (free)
 uv run betsim odds             # price snapshot             (1 credit)
 uv run betsim odds --closing   # closing snapshot, for CLV  (1 credit)
 uv run betsim scores           # final scores               (2 credits)
+uv run betsim seed-elo         # seed the Elo baseline      (free)
+uv run betsim context          # blind Stage 1 contexts     (free)
 ```
+
+`seed-elo` and `context` use the NHL's own API, which is free and needs no key,
+so neither spends Odds API credits.
 
 ### Credit budget
 
@@ -85,10 +94,40 @@ so move to the $30 tier at that point.
 The client refuses any costed call that would drop the balance below a 25-credit
 reserve, and every run records the credits remaining so the spend is auditable.
 
+### Keeping odds out of the blind stage
+
+Stage 1 must never see a price. If it does, the model's "probability" echoes the
+market and every edge estimate downstream is meaningless, so the rule is enforced
+in code: `betsim.context.assert_no_odds_leak` runs on every context before it is
+stored, and `build_context` calls it itself.
+
+The guard is an **allowlist** of permitted keys rather than a denylist of banned
+words. A denylist fails open -- the first field nobody thought to ban sails
+through. An allowlist fails closed: anything new has to be added to
+`ALLOWED_KEYS` deliberately, which is the review step that should happen. There
+is a second check on string values for betting vocabulary.
+
+The NHL's `/v1/score/{date}` endpoint is deliberately unused because it carries
+an `oddsPartners` field; only `/standings` and `/club-schedule-season` feed the
+context, and both are verified odds-free.
+
+### Matching team names
+
+The two feeds name the same franchise differently, and a mismatch is silent: the
+game gets no context, no Elo rating, and a worthless forecast. Real cases --
+`Montréal Canadiens` (accented in the NHL feed, ASCII in The Odds API),
+`St. Louis Blues` (punctuation), and `Utah Mammoth` (renamed franchise).
+`betsim.teams` normalises accents, punctuation, whitespace and case, and **raises**
+on anything it cannot resolve. The index is derived from the live standings
+rather than hardcoded, so renames do not need a code change.
+
 ### Fixtures
 
-The fixtures in `tests/fixtures/` are **synthetic** -- hand-built to the
-documented v4 schema, not recorded from the live API. Re-record them against the
+The NHL fixtures in `tests/fixtures/nhl/` are **real recorded responses** --
+that API is free, so there was no reason to fake them.
+
+The Odds API fixtures in `tests/fixtures/` are **synthetic** -- hand-built to the
+documented v4 schema, because no key was available. Re-record them against the
 real thing on the first authenticated call:
 
 ```bash

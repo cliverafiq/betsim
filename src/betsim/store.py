@@ -9,8 +9,9 @@ Timestamps are stored as ISO-8601 UTC strings throughout.
 
 from __future__ import annotations
 
+import json
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 
 from betsim.ingest import IngestedGame, IngestedPrice, IngestedScore
@@ -180,3 +181,103 @@ def closing_prices(
         (game_id, bookmaker, market),
     ).fetchall()
     return {r["outcome"]: r["price_decimal"] for r in rows}
+
+
+def insert_context(
+    conn: sqlite3.Connection,
+    game_id: str,
+    payload: Mapping[str, object],
+    *,
+    payload_hash: str,
+    sources: str,
+    built_utc: datetime | None = None,
+) -> int:
+    """Store a Stage 1 context verbatim, with its hash.
+
+    Stored as-is so that what the model saw can be reconstructed exactly; the
+    hash makes an accidental change detectable.
+    """
+    cur = conn.execute(
+        """
+        INSERT INTO contexts (game_id, built_utc, payload_json, payload_hash, sources)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            game_id,
+            iso(built_utc or now_utc()),
+            json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
+            payload_hash,
+            sources,
+        ),
+    )
+    if cur.lastrowid is None:
+        raise RuntimeError("failed to insert a context row")
+    return cur.lastrowid
+
+
+def save_elo_ratings(
+    conn: sqlite3.Connection,
+    ratings: Mapping[str, float],
+    *,
+    games_seeded: int,
+    season: int,
+    updated_utc: datetime | None = None,
+) -> int:
+    """Persist the Elo table so the baseline arm survives a restart."""
+    stamp = iso(updated_utc or now_utc())
+    conn.executemany(
+        """
+        INSERT INTO elo_ratings (tricode, rating, games_seeded, season, updated_utc)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(tricode) DO UPDATE SET
+            rating       = excluded.rating,
+            games_seeded = excluded.games_seeded,
+            season       = excluded.season,
+            updated_utc  = excluded.updated_utc
+        """,
+        [(code, float(r), games_seeded, season, stamp) for code, r in ratings.items()],
+    )
+    return len(ratings)
+
+
+def load_elo_ratings(conn: sqlite3.Connection) -> dict[str, float]:
+    rows = conn.execute("SELECT tricode, rating FROM elo_ratings").fetchall()
+    return {r["tricode"]: r["rating"] for r in rows}
+
+
+def upcoming_games(
+    conn: sqlite3.Connection,
+    sport_key: str,
+    *,
+    after: datetime | None = None,
+) -> list[IngestedGame]:
+    """Scheduled games that have not started, oldest first."""
+    cutoff = iso(after or now_utc())
+    rows = conn.execute(
+        """
+        SELECT id, sport_key, home, away, commence_utc
+          FROM games
+         WHERE sport_key = ? AND status = 'scheduled' AND commence_utc > ?
+         ORDER BY commence_utc ASC
+        """,
+        (sport_key, cutoff),
+    ).fetchall()
+    return [
+        IngestedGame(
+            id=r["id"],
+            sport_key=r["sport_key"],
+            home_team=r["home"],
+            away_team=r["away"],
+            commence_utc=datetime.fromisoformat(r["commence_utc"]),
+        )
+        for r in rows
+    ]
+
+
+def context_exists(conn: sqlite3.Connection, game_id: str, payload_hash: str) -> bool:
+    """Whether this exact context has already been stored for this game."""
+    row = conn.execute(
+        "SELECT 1 FROM contexts WHERE game_id = ? AND payload_hash = ? LIMIT 1",
+        (game_id, payload_hash),
+    ).fetchone()
+    return row is not None

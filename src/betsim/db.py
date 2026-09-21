@@ -135,6 +135,14 @@ CREATE TABLE IF NOT EXISTS calibrations (
     valid_from_utc TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS elo_ratings (
+    tricode       TEXT PRIMARY KEY,
+    rating        REAL NOT NULL,
+    games_seeded  INTEGER NOT NULL,
+    season        INTEGER NOT NULL,
+    updated_utc   TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS runs (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     kind              TEXT NOT NULL,
