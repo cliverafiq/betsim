@@ -83,3 +83,18 @@ def nhl_results():
     for tricode in ("COL", "BOS"):
         out.extend(parse_club_schedule(load_nhl_fixture(f"club_schedule_{tricode}")))
     return out
+
+
+@pytest.fixture
+def nhl_landing_payload() -> dict:
+    return load_nhl_fixture("gamecenter_landing")
+
+
+@pytest.fixture
+def nhl_right_rail_payload() -> dict:
+    return load_nhl_fixture("gamecenter_right_rail")
+
+
+@pytest.fixture
+def nhl_score_payload() -> dict:
+    return load_nhl_fixture("score_by_date")

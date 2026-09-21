@@ -71,7 +71,7 @@ First live slate: **NHL opening night, 2026-09-29**.
 
 ```bash
 uv sync                  # install
-uv run pytest            # 467 tests, no network, no API keys needed
+uv run pytest            # 482 tests, no network, no API keys needed
 uv run ruff check src tests
 uv run betsim init       # create an empty database
 ```
@@ -237,6 +237,23 @@ closing price, both already in `odds_snapshots`. `betsim clv` reports it per
 arm, with the `random` arm labelled as the null -- a bet struck at the slate
 snapshot picks up some CLV from timing alone, so the skill signal is the gap to
 `random`, not the raw number.
+
+### What Stage 1 is shown
+
+Per team, all odds-free and all from the NHL's own free feed: standings and
+record, recent results **stamped with the season they belong to**, rest days,
+season-level rates with league ranks (goals for/against per game, power play,
+penalty kill, faceoffs), and the goaltending depth chart.
+
+Two labels matter more than they look. Goaltending carries
+`confirmed_starter`, normally `null` — the NHL does not publish the starter
+until close to puck drop, and a model shown "39 games played" beside a name
+reads it as tonight's starter unless the absence is stated. `scratches` is
+present and empty for the same reason: it populates near game time, which is
+what makes a late context refresh worth scheduling.
+
+Every block carries the season its numbers come from. On opening night all of
+it describes *last* season, against rosters that have changed.
 
 ### Keeping odds out of the blind stage
 

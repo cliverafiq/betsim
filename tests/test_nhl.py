@@ -159,3 +159,58 @@ def test_a_non_object_response_is_rejected():
         pytest.raises(NhlApiError, match="expected a JSON object"),
     ):
         nhl.standings()
+
+
+# --- pre-game detail --------------------------------------------------------
+
+
+def test_parse_goalies_reads_the_depth_chart(nhl_landing_payload):
+    from betsim.nhl import parse_goalies
+
+    goalies = parse_goalies(nhl_landing_payload)
+    assert set(goalies) == {"home", "away"}
+    season, lines = goalies["home"]
+    assert season == 20252026  # LAST season -- the stats are not current
+    assert len(lines) >= 1
+    g = lines[0]
+    assert g.games_played > 0
+    assert 0.0 < g.save_pct < 1.0
+    assert "-" in g.record
+
+
+def test_parse_team_form_reads_rates_and_league_ranks(nhl_right_rail_payload):
+    from betsim.nhl import parse_team_form
+
+    form = parse_team_form(nhl_right_rail_payload)
+    home = form["home"]
+    assert home.season == 20252026
+    assert home.goals_for_per_game > 0
+    assert 1 <= home.goals_for_rank <= 32
+    assert 0.0 < home.power_play_pct < 1.0
+
+
+def test_parse_scratches_is_empty_before_puck_drop(nhl_right_rail_payload):
+    from betsim.nhl import parse_scratches
+
+    # Scratches populate close to game time, which is why a late context
+    # refresh is worth scheduling.
+    assert parse_scratches(nhl_right_rail_payload) == {"home": [], "away": []}
+
+
+def test_schedule_ids_map_teams_to_the_nhl_game_id(nhl_score_payload):
+    from betsim.nhl import parse_schedule_ids
+
+    ids = parse_schedule_ids(nhl_score_payload)
+    assert ids, "expected at least one game"
+    (home, away), gid = next(iter(ids.items()))
+    assert len(home) == 3 and len(away) == 3
+    assert isinstance(gid, int)
+
+
+def test_parsers_tolerate_a_payload_without_the_block():
+    from betsim.nhl import parse_goalies, parse_schedule_ids, parse_scratches, parse_team_form
+
+    assert parse_goalies({}) == {"home": (0, []), "away": (0, [])}
+    assert parse_team_form({})["home"].goals_for_per_game is None
+    assert parse_scratches({}) == {"home": [], "away": []}
+    assert parse_schedule_ids({}) == {}

@@ -39,7 +39,16 @@ from betsim.forecaster import Stage1Forecaster, summarise
 from betsim.ingest import market_widths, parse_events, parse_odds, parse_scores
 from betsim.ledger import arm_state, arms_in_play, verify_ledger
 from betsim.money import minor_to_units
-from betsim.nhl import NhlApiError, NhlClient, parse_club_schedule, parse_standings
+from betsim.nhl import (
+    NhlApiError,
+    NhlClient,
+    parse_club_schedule,
+    parse_goalies,
+    parse_schedule_ids,
+    parse_scratches,
+    parse_standings,
+    parse_team_form,
+)
 from betsim.oddsapi import OddsApiClient, OddsApiError
 from betsim.prompts import load_prompt
 from betsim.report import fit_calibration, render
@@ -248,6 +257,39 @@ def cmd_seed_elo(args: argparse.Namespace) -> int:
     return 0
 
 
+def _nhl_game_ids(nhl: NhlClient, games) -> dict[str, int]:
+    """Match each Odds API game to its NHL game id, on teams and date.
+
+    A game at 02:10Z is the previous evening in Eastern time, so the NHL's date
+    for it is not the UTC date. Both are checked rather than converting time
+    zones, because the feed is free and a missed match silently costs a game its
+    goaltending context.
+    """
+    dates: set[str] = set()
+    for game in games:
+        day = game.commence_utc.date()
+        dates.add(day.isoformat())
+        dates.add((day - timedelta(days=1)).isoformat())
+
+    lookup: dict[tuple[str, str], int] = {}
+    for date in sorted(dates):
+        try:
+            lookup.update(parse_schedule_ids(nhl.score_for_date(date)))
+        except NhlApiError:
+            continue
+        time.sleep(NHL_CALL_DELAY)
+    return lookup
+
+
+def _pregame_details(nhl: NhlClient, nhl_game_id: int) -> tuple[dict, dict, dict]:
+    """Goaltending, team form and scratches for one game. All free."""
+    landing = nhl.gamecenter_landing(nhl_game_id)
+    time.sleep(NHL_CALL_DELAY)
+    rail = nhl.gamecenter_right_rail(nhl_game_id)
+    time.sleep(NHL_CALL_DELAY)
+    return parse_goalies(landing), parse_team_form(rail), parse_scratches(rail)
+
+
 def cmd_context(args: argparse.Namespace) -> int:
     """Build and store the blind Stage 1 context for upcoming games. Free."""
     conn = _open_db(args.db)
@@ -271,14 +313,36 @@ def cmd_context(args: argparse.Namespace) -> int:
         by_code, results = _nhl_context_sources(tricodes, args.season)
         history = index_results_by_team(results)
 
+        details: dict[str, tuple[dict, dict, dict]] = {}
+        if not args.no_pregame:
+            with NhlClient() as nhl:
+                ids = _nhl_game_ids(nhl, games)
+                for game in games:
+                    key = (index.tricode(game.home_team), index.tricode(game.away_team))
+                    nhl_id = ids.get(key)
+                    if nhl_id is None:
+                        print(f"  no NHL game id for {key[1]} @ {key[0]}", file=sys.stderr)
+                        continue
+                    try:
+                        details[game.id] = _pregame_details(nhl, nhl_id)
+                    except NhlApiError as exc:
+                        print(
+                            f"  pre-game detail unavailable for {game.id}: {exc}",
+                            file=sys.stderr,
+                        )
+
         stored = skipped = 0
         with conn:
             for game in games:
+                goalies, form, scratches = details.get(game.id, (None, None, None))
                 payload = build_context(
                     game,
                     index=index,
                     standings=by_code,
                     results_by_team=history,
+                    goalies=goalies,
+                    form=form,
+                    scratches=scratches,
                 )
                 digest = context_hash(payload)
                 if context_exists(conn, game.id, digest):
@@ -289,10 +353,17 @@ def cmd_context(args: argparse.Namespace) -> int:
                     game.id,
                     payload,
                     payload_hash=digest,
-                    sources="api-web.nhle.com/v1: standings, club-schedule-season",
+                    sources=(
+                        "api-web.nhle.com/v1: standings, club-schedule-season"
+                        + (", gamecenter" if game.id in details else "")
+                    ),
                 )
                 stored += 1
-        print(f"{stored} contexts stored, {skipped} unchanged ({len(tricodes)} teams, 0 credits)")
+        enriched = sum(1 for g in games if g.id in details)
+        print(
+            f"{stored} contexts stored, {skipped} unchanged "
+            f"({len(tricodes)} teams, {enriched} with pre-game detail, 0 credits)"
+        )
     finally:
         conn.close()
     return 0
@@ -688,6 +759,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ctx = common(sub.add_parser("context", help="build blind Stage 1 contexts (free)"))
     p_ctx.add_argument("--season", type=int, default=PRIOR_SEASON)
+    p_ctx.add_argument(
+        "--no-pregame", action="store_true", help="skip goaltending, team form and scratches"
+    )
     p_ctx.add_argument(
         "--within-hours", type=int, default=None, help="slate horizon; 0 for no limit"
     )

@@ -243,3 +243,86 @@ def test_seeding_separates_good_teams_from_bad(results, standings_by_code):
     ranked = sorted(table.ratings.items(), key=lambda kv: -kv[1])
     best, worst = ranked[0][0], ranked[-1][0]
     assert standings_by_code[best].points > standings_by_code[worst].points
+
+
+# --- enriched context -------------------------------------------------------
+
+
+def test_enriched_context_passes_the_leak_guard(
+    game, team_index, standings_by_code, history, nhl_landing_payload, nhl_right_rail_payload
+):
+    from betsim.nhl import parse_goalies, parse_scratches, parse_team_form
+
+    ctx = build_context(
+        game,
+        index=team_index,
+        standings=standings_by_code,
+        results_by_team=history,
+        goalies=parse_goalies(nhl_landing_payload),
+        form=parse_team_form(nhl_right_rail_payload),
+        scratches=parse_scratches(nhl_right_rail_payload),
+    )
+    assert_no_odds_leak(ctx)
+    assert ctx["schema_version"] == 2
+
+
+def test_goaltending_is_labelled_as_a_depth_chart_not_a_starter(
+    game, team_index, standings_by_code, history, nhl_landing_payload
+):
+    # A model shown "39 games played" beside a name will read it as tonight's
+    # starter unless the absence of one is stated explicitly.
+    from betsim.nhl import parse_goalies
+
+    ctx = build_context(
+        game,
+        index=team_index,
+        standings=standings_by_code,
+        results_by_team=history,
+        goalies=parse_goalies(nhl_landing_payload),
+    )
+    goalies = ctx["home"]["goalies"]
+    assert "confirmed_starter" in goalies
+    assert goalies["confirmed_starter"] is None
+    assert goalies["season"] == 20252026  # stats are from last season
+    assert goalies["depth"][0]["save_pct"] is not None
+
+
+def test_team_stats_carry_their_season_and_ranks(
+    game, team_index, standings_by_code, history, nhl_right_rail_payload
+):
+    from betsim.nhl import parse_team_form
+
+    ctx = build_context(
+        game,
+        index=team_index,
+        standings=standings_by_code,
+        results_by_team=history,
+        form=parse_team_form(nhl_right_rail_payload),
+    )
+    stats = ctx["home"]["team_stats"]
+    assert stats["season"] == 20252026
+    assert 1 <= stats["goals_for_rank"] <= 32
+
+
+def test_context_omits_pregame_blocks_when_unavailable(context):
+    # The NHL feed can be missing a game; the context must still build.
+    assert "goalies" not in context["home"]
+    assert "team_stats" not in context["home"]
+
+
+def test_enrichment_changes_the_context_hash(
+    game, team_index, standings_by_code, history, nhl_right_rail_payload
+):
+    from betsim.nhl import parse_team_form
+
+    plain = build_context(
+        game, index=team_index, standings=standings_by_code, results_by_team=history
+    )
+    rich = build_context(
+        game,
+        index=team_index,
+        standings=standings_by_code,
+        results_by_team=history,
+        form=parse_team_form(nhl_right_rail_payload),
+    )
+    assert context_hash(plain) != context_hash(rich)

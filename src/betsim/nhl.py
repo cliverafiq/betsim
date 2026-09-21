@@ -84,6 +84,33 @@ class TeamStanding:
 
 
 @dataclass(frozen=True, slots=True)
+class GoalieLine:
+    name: str
+    games_played: int
+    goals_against_average: float | None
+    save_pct: float | None
+    record: str
+    shutouts: int
+
+
+@dataclass(frozen=True, slots=True)
+class TeamForm:
+    """Season-level team stats with league ranks, from a stated season."""
+
+    season: int
+    goals_for_per_game: float | None
+    goals_for_rank: int | None
+    goals_against_per_game: float | None
+    goals_against_rank: int | None
+    power_play_pct: float | None
+    power_play_rank: int | None
+    penalty_kill_pct: float | None
+    penalty_kill_rank: int | None
+    faceoff_win_pct: float | None
+    faceoff_rank: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class NhlGameResult:
     id: int
     season: int
@@ -222,6 +249,20 @@ class NhlClient:
     def standings(self, date: str = "now") -> dict[str, Any]:
         return self._get(f"/v1/standings/{date}")
 
+    def score_for_date(self, date: str) -> dict[str, Any]:
+        """/v1/score/{YYYY-MM-DD} -- used only to map games to NHL ids.
+
+        Note this endpoint carries an ``oddsPartners`` field, so only the game
+        identifiers are taken from it and nothing else reaches a context.
+        """
+        return self._get(f"/v1/score/{date}")
+
+    def gamecenter_landing(self, game_id: int) -> dict[str, Any]:
+        return self._get(f"/v1/gamecenter/{game_id}/landing")
+
+    def gamecenter_right_rail(self, game_id: int) -> dict[str, Any]:
+        return self._get(f"/v1/gamecenter/{game_id}/right-rail")
+
     def club_schedule_season(self, tricode: str, season: str | int) -> dict[str, Any]:
         """``season`` is YYYYYYYY, e.g. 20252026."""
         return self._get(f"/v1/club-schedule-season/{tricode.upper()}/{season}")
@@ -245,3 +286,104 @@ class NhlClient:
                 raise NhlApiError(f"{path}: expected a JSON object")
             return payload
         raise NhlApiError(f"{path}: exhausted retries")
+
+
+def _num(value: Any) -> float | None:
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _rank(value: Any) -> int | None:
+    try:
+        return None if value is None else int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_goalies(payload: Mapping[str, Any]) -> dict[str, tuple[int, list[GoalieLine]]]:
+    """Parse ``matchup.goalieComparison`` from /v1/gamecenter/{id}/landing.
+
+    Returns ``{"home"|"away": (season, [GoalieLine, ...])}``. This is the team's
+    goalie **depth chart with season statistics** -- it is NOT the confirmed
+    starter, which the NHL feed does not publish this far ahead. Callers must
+    label it as such: a model shown "39 games played" beside a name will
+    otherwise read it as tonight's starter.
+    """
+    matchup = payload.get("matchup") or {}
+    comparison = matchup.get("goalieComparison") or {}
+    season = _rank(comparison.get("contextSeason")) or 0
+    out: dict[str, tuple[int, list[GoalieLine]]] = {}
+    for api_side, side in (("homeTeam", "home"), ("awayTeam", "away")):
+        lines = []
+        for g in (comparison.get(api_side) or {}).get("leaders") or []:
+            lines.append(
+                GoalieLine(
+                    name=localised(g.get("name"), "goalie.name"),
+                    games_played=_rank(g.get("gamesPlayed")) or 0,
+                    goals_against_average=_num(g.get("gaa")),
+                    save_pct=_num(g.get("savePctg")),
+                    record=str(g.get("record") or ""),
+                    shutouts=_rank(g.get("shutouts")) or 0,
+                )
+            )
+        out[side] = (season, lines)
+    return out
+
+
+def parse_team_form(payload: Mapping[str, Any]) -> dict[str, TeamForm]:
+    """Parse ``teamSeasonStats`` from /v1/gamecenter/{id}/right-rail."""
+    stats = payload.get("teamSeasonStats") or {}
+    season = _rank(stats.get("contextSeason")) or 0
+    out: dict[str, TeamForm] = {}
+    for api_side, side in (("homeTeam", "home"), ("awayTeam", "away")):
+        s = stats.get(api_side) or {}
+        out[side] = TeamForm(
+            season=season,
+            goals_for_per_game=_num(s.get("goalsForPerGamePlayed")),
+            goals_for_rank=_rank(s.get("goalsForPerGamePlayedRank")),
+            goals_against_per_game=_num(s.get("goalsAgainstPerGamePlayed")),
+            goals_against_rank=_rank(s.get("goalsAgainstPerGamePlayedRank")),
+            power_play_pct=_num(s.get("ppPctg")),
+            power_play_rank=_rank(s.get("ppPctgRank")),
+            penalty_kill_pct=_num(s.get("pkPctg")),
+            penalty_kill_rank=_rank(s.get("pkPctgRank")),
+            faceoff_win_pct=_num(s.get("faceoffWinningPctg")),
+            faceoff_rank=_rank(s.get("faceoffWinningPctgRank")),
+        )
+    return out
+
+
+def parse_scratches(payload: Mapping[str, Any]) -> dict[str, list[str]]:
+    """Parse ``gameInfo.scratches`` from /v1/gamecenter/{id}/right-rail.
+
+    Empty until close to puck drop, which is exactly why a late context refresh
+    is worth scheduling.
+    """
+    info = payload.get("gameInfo") or {}
+    out: dict[str, list[str]] = {}
+    for api_side, side in (("homeTeam", "home"), ("awayTeam", "away")):
+        names = []
+        for entry in (info.get(api_side) or {}).get("scratches") or []:
+            first = localised(entry.get("firstName", ""), "scratch.firstName")
+            last = localised(entry.get("lastName", ""), "scratch.lastName")
+            names.append(f"{first} {last}".strip())
+        out[side] = names
+    return out
+
+
+def parse_schedule_ids(payload: Mapping[str, Any]) -> dict[tuple[str, str], int]:
+    """Map ``(home_tricode, away_tricode)`` to the NHL game id for one date.
+
+    The Odds API and the NHL use different identifiers for the same game, so
+    they have to be matched on teams and date.
+    """
+    out: dict[tuple[str, str], int] = {}
+    for game in payload.get("games") or []:
+        home = (game.get("homeTeam") or {}).get("abbrev")
+        away = (game.get("awayTeam") or {}).get("abbrev")
+        gid = _rank(game.get("id"))
+        if home and away and gid:
+            out[(str(home), str(away))] = gid
+    return out

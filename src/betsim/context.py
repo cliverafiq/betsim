@@ -22,10 +22,10 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 
 from betsim.ingest import IngestedGame
-from betsim.nhl import NhlGameResult, TeamStanding
+from betsim.nhl import GoalieLine, NhlGameResult, TeamForm, TeamStanding
 from betsim.teams import TeamIndex
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DEFAULT_RECENT_GAMES = 5
 
 ALLOWED_KEYS = frozenset(
@@ -58,6 +58,28 @@ ALLOWED_KEYS = frozenset(
         "at_home",
         "result",
         "finish",
+        # team form: season-level rates with league ranks
+        "team_stats",
+        "goals_for_per_game",
+        "goals_for_rank",
+        "goals_against_per_game",
+        "goals_against_rank",
+        "power_play_pct",
+        "power_play_rank",
+        "penalty_kill_pct",
+        "penalty_kill_rank",
+        "faceoff_win_pct",
+        "faceoff_rank",
+        # goaltending: a depth chart with season stats, not tonight's starter
+        "goalies",
+        "confirmed_starter",
+        "depth",
+        "name",
+        "goals_against_average",
+        "save_pct",
+        "shutouts",
+        # availability, empty until close to puck drop
+        "scratches",
     }
 )
 
@@ -168,14 +190,69 @@ def _rest_days(history: Sequence[NhlGameResult], before: datetime) -> int | None
     return (before - played[-1].start_utc).days
 
 
+def _goalie_block(
+    season: int, lines: Sequence[GoalieLine], starter: str | None
+) -> dict[str, object]:
+    """Goaltending, stamped with the season the numbers come from.
+
+    ``confirmed_starter`` is explicitly present and usually ``null``: the NHL
+    feed does not publish the starter until close to puck drop. Without that
+    field a model shown "39 games played" beside a name will read it as
+    tonight's starter rather than a depth chart.
+    """
+    return {
+        "season": season,
+        "confirmed_starter": starter,
+        "depth": [
+            {
+                "name": g.name,
+                "games_played": g.games_played,
+                "goals_against_average": g.goals_against_average,
+                "save_pct": g.save_pct,
+                "record": g.record,
+                "shutouts": g.shutouts,
+            }
+            for g in lines
+        ],
+    }
+
+
+def _form_block(form: TeamForm) -> dict[str, object]:
+    return {
+        "season": form.season,
+        "goals_for_per_game": form.goals_for_per_game,
+        "goals_for_rank": form.goals_for_rank,
+        "goals_against_per_game": form.goals_against_per_game,
+        "goals_against_rank": form.goals_against_rank,
+        "power_play_pct": form.power_play_pct,
+        "power_play_rank": form.power_play_rank,
+        "penalty_kill_pct": form.penalty_kill_pct,
+        "penalty_kill_rank": form.penalty_kill_rank,
+        "faceoff_win_pct": form.faceoff_win_pct,
+        "faceoff_rank": form.faceoff_rank,
+    }
+
+
 def _team_block(
     tricode: str,
     standing: TeamStanding,
     history: Sequence[NhlGameResult],
     start_utc: datetime,
     recent: int,
+    *,
+    goalies: tuple[int, Sequence[GoalieLine]] | None = None,
+    form: TeamForm | None = None,
+    scratches: Sequence[str] | None = None,
 ) -> dict[str, object]:
+    extra: dict[str, object] = {}
+    if goalies is not None:
+        extra["goalies"] = _goalie_block(goalies[0], goalies[1], None)
+    if form is not None:
+        extra["team_stats"] = _form_block(form)
+    if scratches is not None:
+        extra["scratches"] = list(scratches)
     return {
+        **extra,
         "team": standing.name,
         "tricode": tricode,
         "record": standing.record,
@@ -200,6 +277,9 @@ def build_context(
     standings: Mapping[str, TeamStanding],
     results_by_team: Mapping[str, Sequence[NhlGameResult]],
     recent: int = DEFAULT_RECENT_GAMES,
+    goalies: Mapping[str, tuple[int, Sequence[GoalieLine]]] | None = None,
+    form: Mapping[str, TeamForm] | None = None,
+    scratches: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, object]:
     """Build the blind context for one game.
 
@@ -224,6 +304,9 @@ def build_context(
             results_by_team.get(home_code, []),
             game.commence_utc,
             recent,
+            goalies=(goalies or {}).get("home"),
+            form=(form or {}).get("home"),
+            scratches=(scratches or {}).get("home"),
         ),
         "away": _team_block(
             away_code,
@@ -231,6 +314,9 @@ def build_context(
             results_by_team.get(away_code, []),
             game.commence_utc,
             recent,
+            goalies=(goalies or {}).get("away"),
+            form=(form or {}).get("away"),
+            scratches=(scratches or {}).get("away"),
         ),
     }
     assert_no_odds_leak(payload)
