@@ -13,7 +13,7 @@ import os
 import sqlite3
 import sys
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -29,6 +29,7 @@ from betsim.config import (
     MODEL_ID,
     PRIMARY_DEVIG_METHOD,
     REGION,
+    SLATE_HORIZON,
 )
 from betsim.context import build_context, context_hash, index_results_by_team, seed_elo_from_results
 from betsim.db import connect, init_db
@@ -73,6 +74,14 @@ NOT_YET: dict[str, str] = {}
 PRIOR_SEASON = 20252026
 NHL_CALL_DELAY = 0.15  # be a considerate client of a free public API
 CHARS_PER_TOKEN = 4  # rough, for the dry run only
+
+
+def _horizon(args: argparse.Namespace) -> timedelta | None:
+    """Slate horizon in hours; 0 means no limit."""
+    hours = getattr(args, "within_hours", None)
+    if hours is None:
+        return SLATE_HORIZON
+    return None if hours <= 0 else timedelta(hours=hours)
 
 
 def _api_key() -> str:
@@ -242,7 +251,7 @@ def cmd_context(args: argparse.Namespace) -> int:
     """Build and store the blind Stage 1 context for upcoming games. Free."""
     conn = _open_db(args.db)
     try:
-        games = upcoming_games(conn, args.sport)
+        games = upcoming_games(conn, args.sport, within=_horizon(args))
         if not games:
             print("no upcoming games; run `betsim events` first")
             return 0
@@ -292,7 +301,7 @@ def cmd_forecast(args: argparse.Namespace) -> int:
     """Run k blind Stage 1 draws per game. **This spends money on LLM calls.**"""
     conn = _open_db(args.db)
     try:
-        games = upcoming_games(conn, args.sport)
+        games = upcoming_games(conn, args.sport, within=_horizon(args))
         contexts = latest_contexts(conn, [g.id for g in games])
         pending = [g for g in games if g.id in contexts]
         missing = [g.id for g in games if g.id not in contexts]
@@ -375,7 +384,7 @@ def cmd_slate(args: argparse.Namespace) -> int:
     """Run the daily loop across every arm. Spends money unless --dry-run."""
     conn = _open_db(args.db)
     try:
-        games = upcoming_games(conn, args.sport)
+        games = upcoming_games(conn, args.sport, within=_horizon(args))
         refs = build_game_refs(conn, games)
         if not refs:
             print("no games with designated-bookmaker prices; run `betsim odds` first")
@@ -670,6 +679,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ctx = common(sub.add_parser("context", help="build blind Stage 1 contexts (free)"))
     p_ctx.add_argument("--season", type=int, default=PRIOR_SEASON)
+    p_ctx.add_argument(
+        "--within-hours", type=int, default=None, help="slate horizon; 0 for no limit"
+    )
     p_ctx.set_defaults(func=cmd_context)
 
     p_fc = common(sub.add_parser("forecast", help="run blind Stage 1 draws (SPENDS MONEY)"))
@@ -680,6 +692,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_fc.add_argument(
         "--force", action="store_true", help="re-forecast games that already have draws"
     )
+    p_fc.add_argument(
+        "--within-hours", type=int, default=None, help="slate horizon; 0 for no limit"
+    )
     p_fc.set_defaults(func=cmd_forecast)
 
     p_sl = common(sub.add_parser("slate", help="run the daily loop across every arm"))
@@ -688,6 +703,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_sl.add_argument("--effort", default=EFFORT, choices=("low", "medium", "high", "xhigh", "max"))
     p_sl.add_argument("--seed", type=int, default=0, help="seed for the random arm")
     p_sl.add_argument("--dry-run", action="store_true", help="shadow arms only, no LLM calls")
+    p_sl.add_argument(
+        "--within-hours", type=int, default=None, help="slate horizon; 0 for no limit"
+    )
     p_sl.set_defaults(func=cmd_slate)
 
     p_cl = common(sub.add_parser("close", help="closing snapshot near puck drop (costs credits)"))

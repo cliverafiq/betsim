@@ -110,6 +110,7 @@ def run_slate(
     sport: str,
     decider: Stage2Decider | None,
     k: int,
+    refs: Sequence[GameRef] | None = None,
     now: datetime | None = None,
     elo_probs: Mapping[str, Mapping[str, float]] | None = None,
     random_seed: int = 0,
@@ -123,8 +124,10 @@ def run_slate(
     spec = get_sport(sport)
     result = SlateResult()
 
-    games = upcoming_games(conn, sport, after=stamp)
-    refs = build_game_refs(conn, games)
+    # The caller usually resolves the slate itself (applying the horizon); fall
+    # back to every upcoming game only when it did not.
+    if refs is None:
+        refs = build_game_refs(conn, upcoming_games(conn, sport, after=stamp))
     if not refs:
         result.notes.append("no games with designated-bookmaker prices")
         return result

@@ -22,6 +22,12 @@ FLAT_STAKE_MINOR = 10 * MINOR_PER_UNIT  # `fav` and `random` arms
 MAX_SNAPSHOT_AGE = timedelta(minutes=60)
 CLOSING_WINDOW = timedelta(minutes=15)
 
+# How far ahead a slate reaches. The odds feed returns everything it has, often
+# ten days out. Forecasting that far ahead wastes money and uses standings and
+# form that will have moved by game time, so a slate covers roughly the next
+# day and a half.
+SLATE_HORIZON = timedelta(hours=36)
+
 # --- market -----------------------------------------------------------------
 # Chosen from what the account can actually see, measured on a live 33-game
 # slate rather than assumed. Pinnacle was the plan's designated book -- 2-3%

@@ -150,11 +150,22 @@ violations and refusals are results, and one bad game must not take down a
 slate. `params_json` records the model, effort, thinking config and token
 ceiling, and deliberately has no `temperature` field.
 
-Measured cost, at the real rendered prompt size of ~1,000 input tokens:
-roughly **$0.03-0.06 per call**, so Stage 1 for a full NHL season at k=5 is
-about **$160-350** depending on how much the model thinks. Run
-`betsim forecast --dry-run` first -- it renders every prompt and reports the
-call count without touching the API.
+**Measured cost**, calibrated against a real call (2,149 input / 294 output
+tokens for Stage 1, $0.0181):
+
+| | per night (7 games) | per season (180 nights) |
+|---|---|---|
+| k=1 | $0.16 | $29 |
+| k=3 | $0.49 | $88 |
+| **k=5** | **$0.81** | **$146** |
+
+A slate reaches only `SLATE_HORIZON` (36 hours) ahead. The odds feed returns
+everything it has, often ten days out; forecasting that far ahead both wastes
+money and uses standings and form that will have moved by game time. Override
+with `--within-hours`, or `--within-hours 0` for no limit.
+
+`betsim forecast --dry-run` renders every prompt and reports the call count
+without touching the API.
 
 ### The arms
 

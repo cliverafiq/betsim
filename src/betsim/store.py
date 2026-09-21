@@ -265,17 +265,28 @@ def upcoming_games(
     sport_key: str,
     *,
     after: datetime | None = None,
+    within: timedelta | None = None,
 ) -> list[IngestedGame]:
-    """Scheduled games that have not started, oldest first."""
-    cutoff = iso(after or now_utc())
+    """Scheduled games that have not started, oldest first.
+
+    ``within`` bounds the horizon. The odds feed returns everything it has --
+    often ten days out -- and forecasting that far ahead is both wasteful and
+    worse science: the context is built from standings and recent form that will
+    have moved by the time the game is played.
+    """
+    start = after or now_utc()
+    clause, args = "", [sport_key, iso(start)]
+    if within is not None:
+        clause = " AND commence_utc <= ?"
+        args.append(iso(start + within))
     rows = conn.execute(
-        """
+        f"""
         SELECT id, sport_key, home, away, commence_utc
           FROM games
-         WHERE sport_key = ? AND status = 'scheduled' AND commence_utc > ?
+         WHERE sport_key = ? AND status = 'scheduled' AND commence_utc > ?{clause}
          ORDER BY commence_utc ASC
         """,
-        (sport_key, cutoff),
+        tuple(args),
     ).fetchall()
     return [
         IngestedGame(

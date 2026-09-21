@@ -415,13 +415,30 @@ def test_forecast_reports_games_without_a_context(tmp_path, monkeypatch, capsys,
 # --- M4: the full daily loop ------------------------------------------------
 
 
+from tests.conftest import shift_slate as _shift
+
+
 def _full_pipeline(
-    tmp_path, monkeypatch, events_payload, odds_payload, standings_payload, schedule_payload, *, k=2
+    tmp_path,
+    monkeypatch,
+    events_payload,
+    odds_payload,
+    standings_payload,
+    schedule_payload,
+    *,
+    k=2,
+    starts_in_minutes=180,
 ):
-    """events -> odds -> context -> seed-elo -> forecast, ready for a slate."""
+    """events -> odds -> context -> seed-elo -> forecast, ready for a slate.
+
+    The slate is shifted to start soon, because a real slate is imminent games
+    and the 36-hour horizon deliberately excludes anything further out.
+    """
     from tests.test_forecaster import forecast as make_forecast
     from tests.test_forecaster import response as make_response
 
+    _shift(events_payload, starts_in_minutes)
+    _shift(odds_payload, starts_in_minutes)
     db = tmp_path / "b.db"
     stub_client(monkeypatch, events_payload)
     main(["events", "--db", str(db)])
@@ -671,16 +688,6 @@ def test_slate_without_prices_says_what_to_run(tmp_path, monkeypatch, capsys, ev
 # --- M5: closing snapshots, settlement and CLV ------------------------------
 
 
-def _soon(payload, minutes=12):
-    """Shift a fixture slate to just inside the closing window."""
-    from datetime import UTC, datetime, timedelta
-
-    start = datetime.now(UTC) + timedelta(minutes=minutes)
-    for i, event in enumerate(payload):
-        event["commence_time"] = (start + timedelta(seconds=i)).isoformat().replace("+00:00", "Z")
-    return payload
-
-
 def test_a_full_day_runs_end_to_end(
     tmp_path,
     monkeypatch,
@@ -692,8 +699,6 @@ def test_a_full_day_runs_end_to_end(
     nhl_schedule_payload,
 ):
     """slate -> close -> settle -> clv, with the ledger verified throughout."""
-    _soon(events_payload)
-    _soon(odds_payload)
     db = _full_pipeline(
         tmp_path,
         monkeypatch,
@@ -702,6 +707,7 @@ def test_a_full_day_runs_end_to_end(
         nhl_standings_payload,
         nhl_schedule_payload,
         k=1,
+        starts_in_minutes=12,  # inside the 15-minute closing window
     )
 
     # 1. Place bets across every shadow arm.
@@ -761,8 +767,6 @@ def test_settle_reports_per_arm_profit(
     nhl_standings_payload,
     nhl_schedule_payload,
 ):
-    _soon(events_payload)
-    _soon(odds_payload)
     db = _full_pipeline(
         tmp_path,
         monkeypatch,
@@ -771,6 +775,7 @@ def test_settle_reports_per_arm_profit(
         nhl_standings_payload,
         nhl_schedule_payload,
         k=1,
+        starts_in_minutes=12,  # inside the 15-minute closing window
     )
     main(["slate", "--db", str(db), "--k", "1", "--dry-run"])
     stub_client(monkeypatch, scores_payload)

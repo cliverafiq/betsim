@@ -11,14 +11,32 @@ def load_fixture(name: str) -> list[dict]:
     return json.loads((FIXTURES / f"{name}.json").read_text())["payload"]
 
 
+DEFAULT_START_MINUTES = 180
+
+
+def shift_slate(payload: list[dict], minutes: int = DEFAULT_START_MINUTES) -> list[dict]:
+    """Move a fixture slate to `minutes` from now.
+
+    The slate horizon deliberately excludes games more than 36 hours out, so a
+    fixture with fixed 2026-09-29 dates would fall outside it and every slate
+    test would silently find nothing.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    start = datetime.now(UTC) + timedelta(minutes=minutes)
+    for i, event in enumerate(payload):
+        event["commence_time"] = (start + timedelta(seconds=i)).isoformat().replace("+00:00", "Z")
+    return payload
+
+
 @pytest.fixture
 def odds_payload() -> list[dict]:
-    return load_fixture("odds_icehockey_nhl")
+    return shift_slate(load_fixture("odds_icehockey_nhl"))
 
 
 @pytest.fixture
 def events_payload() -> list[dict]:
-    return load_fixture("events_icehockey_nhl")
+    return shift_slate(load_fixture("events_icehockey_nhl"))
 
 
 @pytest.fixture
