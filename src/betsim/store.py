@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
+from collections.abc import Collection, Mapping, Sequence
+from datetime import UTC, datetime, timedelta
 
 from betsim.ingest import IngestedGame, IngestedPrice, IngestedScore
 from betsim.settlement import GameStatus
@@ -52,12 +52,27 @@ def insert_snapshots(
     prices: Sequence[IngestedPrice],
     *,
     captured_utc: datetime,
-    is_closing: bool = False,
+    closing_game_ids: Collection[str] = (),
 ) -> int:
-    """Append price rows. Snapshots are immutable history and are never updated."""
+    """Append price rows. Snapshots are immutable history and are never updated.
+
+    ``closing_game_ids`` marks the snapshot as *closing* for those games only.
+    Closing is a property of a game being about to start, not of the run: marking
+    a whole slate closing would record a price hours before the off as the close
+    and make CLV -- the primary metric -- meaningless.
+    """
     captured = iso(captured_utc)
+    closing = set(closing_game_ids)
     rows = [
-        (p.game_id, captured, p.bookmaker, p.market, p.selection, p.price_decimal, int(is_closing))
+        (
+            p.game_id,
+            captured,
+            p.bookmaker,
+            p.market,
+            p.selection,
+            p.price_decimal,
+            int(p.game_id in closing),
+        )
         for p in prices
     ]
     conn.executemany(
@@ -512,3 +527,38 @@ def insert_rejection(
             iso(created_utc or now_utc()),
         ),
     )
+
+
+def games_starting_within(
+    conn: sqlite3.Connection,
+    sport_key: str,
+    window: timedelta,
+    *,
+    now: datetime | None = None,
+) -> set[str]:
+    """Scheduled games that start inside ``window`` -- the ones whose price is
+    close enough to the off to count as a closing line."""
+    start = now or now_utc()
+    rows = conn.execute(
+        """
+        SELECT id FROM games
+         WHERE sport_key = ? AND status = 'scheduled'
+           AND commence_utc > ? AND commence_utc <= ?
+        """,
+        (sport_key, iso(start), iso(start + window)),
+    ).fetchall()
+    return {r["id"] for r in rows}
+
+
+def open_bets_for_settlement(conn: sqlite3.Connection, sport_key: str):
+    """Open bets whose game has reached a state that can be settled."""
+    return conn.execute(
+        """
+        SELECT b.*, g.status AS game_status, g.home_score, g.away_score, g.sport_key
+          FROM bets b JOIN games g ON g.id = b.game_id
+         WHERE b.status = 'open' AND g.sport_key = ?
+           AND g.status IN ('completed', 'postponed', 'cancelled')
+         ORDER BY b.id ASC
+        """,
+        (sport_key,),
+    ).fetchall()

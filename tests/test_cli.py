@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -87,16 +88,41 @@ def test_odds_ingests_prices_and_records_what_it_spent(tmp_path, monkeypatch, ca
     conn.close()
 
 
-def test_closing_flag_marks_the_snapshot(tmp_path, monkeypatch, odds_payload):
+def test_closing_marks_nothing_for_games_that_are_not_about_to_start(
+    tmp_path, monkeypatch, odds_payload
+):
+    # A closing line only means anything near the off. Marking a whole slate
+    # closing hours early would record the wrong price as the close and make
+    # CLV -- the primary metric -- meaningless.
     stub_client(monkeypatch, odds_payload)
     db = tmp_path / "b.db"
     assert main(["odds", "--db", str(db), "--closing"]) == 0
     conn = connect(db)
     assert (
         conn.execute("SELECT COUNT(*) c FROM odds_snapshots WHERE is_closing=1").fetchone()["c"]
-        == 12
+        == 0
     )
+    assert conn.execute("SELECT COUNT(*) c FROM odds_snapshots").fetchone()["c"] == 12
     assert conn.execute("SELECT kind FROM runs").fetchone()["kind"] == "close"
+    conn.close()
+
+
+def test_closing_marks_only_the_games_inside_the_window(tmp_path, monkeypatch, odds_payload):
+    from datetime import UTC, datetime, timedelta
+
+    soon = datetime.now(UTC) + timedelta(minutes=10)  # inside the 15-minute window
+    later = datetime.now(UTC) + timedelta(hours=6)  # outside it
+    odds_payload[0]["commence_time"] = soon.isoformat().replace("+00:00", "Z")
+    for event in odds_payload[1:]:
+        event["commence_time"] = later.isoformat().replace("+00:00", "Z")
+
+    stub_client(monkeypatch, odds_payload)
+    db = tmp_path / "b.db"
+    assert main(["odds", "--db", str(db), "--closing"]) == 0
+
+    conn = connect(db)
+    rows = conn.execute("SELECT DISTINCT game_id FROM odds_snapshots WHERE is_closing=1").fetchall()
+    assert [r["game_id"] for r in rows] == [odds_payload[0]["id"]]
     conn.close()
 
 
@@ -613,3 +639,171 @@ def test_slate_without_prices_says_what_to_run(tmp_path, monkeypatch, capsys, ev
     capsys.readouterr()
     assert main(["slate", "--db", str(db)]) == 0
     assert "run `betsim odds` first" in capsys.readouterr().out
+
+
+# --- M5: closing snapshots, settlement and CLV ------------------------------
+
+
+def _soon(payload, minutes=12):
+    """Shift a fixture slate to just inside the closing window."""
+    from datetime import UTC, datetime, timedelta
+
+    start = datetime.now(UTC) + timedelta(minutes=minutes)
+    for i, event in enumerate(payload):
+        event["commence_time"] = (start + timedelta(seconds=i)).isoformat().replace("+00:00", "Z")
+    return payload
+
+
+def test_a_full_day_runs_end_to_end(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    events_payload,
+    odds_payload,
+    scores_payload,
+    nhl_standings_payload,
+    nhl_schedule_payload,
+):
+    """slate -> close -> settle -> clv, with the ledger verified throughout."""
+    _soon(events_payload)
+    _soon(odds_payload)
+    db = _full_pipeline(
+        tmp_path,
+        monkeypatch,
+        events_payload,
+        odds_payload,
+        nhl_standings_payload,
+        nhl_schedule_payload,
+        k=1,
+    )
+
+    # 1. Place bets across every shadow arm.
+    assert main(["slate", "--db", str(db), "--k", "1", "--dry-run"]) == 0
+
+    # 2. Closing snapshot -- these games are inside the window, so they mark.
+    stub_client(monkeypatch, odds_payload)
+    assert main(["close", "--db", str(db)]) == 0
+    conn = connect(db)
+    assert (
+        conn.execute(
+            "SELECT COUNT(DISTINCT game_id) c FROM odds_snapshots WHERE is_closing=1"
+        ).fetchone()["c"]
+        == 3
+    )
+    open_before = conn.execute("SELECT COUNT(*) c FROM bets WHERE status='open'").fetchone()["c"]
+    assert open_before > 0
+    conn.close()
+
+    # 3. Settle against final scores.
+    stub_client(monkeypatch, scores_payload)
+    capsys.readouterr()
+    assert main(["settle", "--db", str(db)]) == 0
+    out = capsys.readouterr().out
+    assert "bets settled" in out
+    assert "ledger verified" in out
+
+    conn = connect(db)
+    for arm in {r["arm"] for r in conn.execute("SELECT DISTINCT arm FROM bets")}:
+        verify_ledger(conn, arm)
+        # Money conservation across the whole cycle.
+        row = conn.execute(
+            "SELECT COALESCE(SUM(stake_minor),0) s, COALESCE(SUM(payout_minor),0) p "
+            "FROM bets WHERE arm=?",
+            (arm,),
+        ).fetchone()
+        assert balance(conn, arm) == STARTING_BALANCE_MINOR - row["s"] + row["p"]
+    # The third game never finished, so its bets stay open.
+    assert conn.execute("SELECT COUNT(*) c FROM bets WHERE status='open'").fetchone()["c"] > 0
+    conn.close()
+
+    # 4. CLV is derivable now that both prices exist.
+    capsys.readouterr()
+    assert main(["clv", "--db", str(db)]) == 0
+    clv_out = capsys.readouterr().out
+    assert "mean CLV" in clv_out
+    assert "<- null" in clv_out  # the random arm is the baseline, not zero
+
+
+def test_settle_reports_per_arm_profit(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    events_payload,
+    odds_payload,
+    scores_payload,
+    nhl_standings_payload,
+    nhl_schedule_payload,
+):
+    _soon(events_payload)
+    _soon(odds_payload)
+    db = _full_pipeline(
+        tmp_path,
+        monkeypatch,
+        events_payload,
+        odds_payload,
+        nhl_standings_payload,
+        nhl_schedule_payload,
+        k=1,
+    )
+    main(["slate", "--db", str(db), "--k", "1", "--dry-run"])
+    stub_client(monkeypatch, scores_payload)
+    capsys.readouterr()
+    main(["settle", "--db", str(db)])
+    out = capsys.readouterr().out
+    assert "fav" in out and "random" in out
+    assert " u  balance" in out
+
+
+def test_clv_says_what_to_run_when_there_are_no_closing_prices(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    events_payload,
+    odds_payload,
+    nhl_standings_payload,
+    nhl_schedule_payload,
+):
+    db = _full_pipeline(
+        tmp_path,
+        monkeypatch,
+        events_payload,
+        odds_payload,
+        nhl_standings_payload,
+        nhl_schedule_payload,
+        k=1,
+    )
+    main(["slate", "--db", str(db), "--k", "1", "--dry-run"])
+    capsys.readouterr()
+    assert main(["clv", "--db", str(db)]) == 0
+    assert "run `betsim close` near puck drop" in capsys.readouterr().out
+
+
+# --- doctor -----------------------------------------------------------------
+
+
+def test_doctor_reports_a_missing_env_file(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("betsim.cli.Path", Path)
+    assert main(["doctor", "--db", str(tmp_path / "b.db")]) == 0
+    out = capsys.readouterr().out
+    assert "credentials" in out
+    assert "prompts" in out
+
+
+def test_doctor_masks_keys_instead_of_printing_them(tmp_path, monkeypatch, capsys):
+    # The whole point of the command is that it is safe to run and to paste.
+    import betsim.cli as cli_module
+
+    odds_key = "a" * 32
+    anthropic_key = "sk-ant-" + "A" * 40
+    (tmp_path / "src" / "betsim").mkdir(parents=True)
+    (tmp_path / ".env").write_text(f"ODDS_API_KEY={odds_key}\nANTHROPIC_API_KEY={anthropic_key}\n")
+    monkeypatch.setattr(cli_module, "__file__", str(tmp_path / "src" / "betsim" / "cli.py"))
+
+    main(["doctor", "--db", str(tmp_path / "b.db")])
+    out = capsys.readouterr().out
+
+    # It really did read the file (otherwise the assertions below prove nothing).
+    assert "ODDS_API_KEY" in out and "looks right" in out
+    assert odds_key not in out
+    assert anthropic_key not in out
+    assert "aaaaaa...aaaa" in out  # masked form only

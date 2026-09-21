@@ -19,7 +19,15 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from betsim.arms import elo_probabilities
-from betsim.config import DESIGNATED_BOOKMAKER, EFFORT, K_SEEDS, MARKET, MODEL_ID, REGION
+from betsim.config import (
+    CLOSING_WINDOW,
+    DESIGNATED_BOOKMAKER,
+    EFFORT,
+    K_SEEDS,
+    MARKET,
+    MODEL_ID,
+    REGION,
+)
 from betsim.context import build_context, context_hash, index_results_by_team, seed_elo_from_results
 from betsim.db import connect, init_db
 from betsim.decider import Stage2Decider
@@ -30,12 +38,15 @@ from betsim.ledger import arm_state, arms_in_play, verify_ledger
 from betsim.money import minor_to_units
 from betsim.nhl import NhlApiError, NhlClient, parse_club_schedule, parse_standings
 from betsim.oddsapi import OddsApiClient, OddsApiError
+from betsim.prompts import load_prompt
+from betsim.settle import bet_clv, clv_by_arm, settle_open_bets
 from betsim.slate import build_game_refs, run_slate
 from betsim.store import (
     apply_scores,
     context_exists,
     finish_run,
     forecast_counts,
+    games_starting_within,
     insert_context,
     insert_forecast,
     insert_llm_call,
@@ -121,8 +132,16 @@ def cmd_odds(args: argparse.Namespace) -> int:
                 payload = api.fetch_odds(args.sport, regions=args.regions, markets=MARKET)
                 games, prices = parse_odds(payload, market=MARKET)
                 upsert_games(conn, games)
+                closing_ids = (
+                    games_starting_within(conn, args.sport, CLOSING_WINDOW)
+                    if args.closing
+                    else set()
+                )
                 n = insert_snapshots(
-                    conn, prices, captured_utc=datetime.now(UTC), is_closing=args.closing
+                    conn,
+                    prices,
+                    captured_utc=datetime.now(UTC),
+                    closing_game_ids=closing_ids,
                 )
                 finish_run(
                     conn,
@@ -401,6 +420,160 @@ def cmd_slate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_close(args: argparse.Namespace) -> int:
+    """Take a closing snapshot. Only games inside the window are marked closing."""
+    args.closing = True
+    args.regions = getattr(args, "regions", REGION)
+    args.record = getattr(args, "record", None)
+    return cmd_odds(args)
+
+
+def cmd_settle(args: argparse.Namespace) -> int:
+    """Fetch scores, grade open bets and append the ledger rows. Costs 2 credits."""
+    conn = _open_db(args.db)
+    try:
+        with conn:
+            run_id = start_run(conn, "settle")
+            with OddsApiClient(_api_key(), record_dir=args.record) as api:
+                payload = api.fetch_scores(args.sport, days_from=args.days_from)
+                scores = parse_scores(payload)
+                completed = apply_scores(conn, scores)
+            result = settle_open_bets(conn, args.sport)
+            finish_run(
+                conn,
+                run_id,
+                credits_remaining=api.quota.remaining,
+                notes=f"settle: {completed} games, {result.settled} bets, "
+                f"cost {api.quota.last_cost}",
+            )
+
+        print(f"{completed} of {len(scores)} games completed")
+        print(
+            f"{result.settled} bets settled: {result.won} won, {result.lost} lost, "
+            f"{result.void} void"
+        )
+        for arm in sorted(result.by_arm):
+            profit = minor_to_units(result.profit_minor.get(arm, 0))
+            state = arm_state(conn, arm)
+            print(
+                f"  {arm:20} {result.by_arm[arm]:2} settled  {profit:+8.2f} u  "
+                f"balance {minor_to_units(state.balance_minor):8.2f} u"
+                f"{'  BUST' if state.bust else ''}"
+            )
+        for err in result.errors:
+            print(f"  ERROR {err}", file=sys.stderr)
+
+        for arm in arms_in_play(conn):
+            verify_ledger(conn, arm)
+        print("  ledger verified")
+        print(f"credits remaining: {api.quota.remaining}")
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_clv(args: argparse.Namespace) -> int:
+    """Closing line value per arm. Free -- derived from data already stored."""
+    conn = _open_db(args.db)
+    try:
+        values = bet_clv(conn)
+        if not values:
+            print("no bets have a closing price yet; run `betsim close` near puck drop")
+            return 0
+        summary = clv_by_arm(values)
+        baseline = summary.get("random", {}).get("mean_clv")
+        print(f"CLV over {len(values)} bets with a closing price:")
+        for arm, stats in summary.items():
+            marker = "  <- null" if arm == "random" else ""
+            print(f"  {arm:20} n={stats['n']:3}  mean CLV {stats['mean_clv']:+.4f}{marker}")
+        if baseline is not None:
+            print(f"\n  The null is the `random` arm ({baseline:+.4f}), not zero: a bet struck")
+            print("  at the slate snapshot picks up some CLV from timing alone.")
+    finally:
+        conn.close()
+    return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Check credentials and setup without printing or transmitting any secret."""
+    import re
+    import subprocess
+
+    root = Path(__file__).resolve().parents[2]
+    env_path = root / ".env"
+    problems = 0
+
+    print("credentials")
+    if not env_path.exists():
+        print(f"  .env               MISSING -- copy {root / '.env.example'} to .env")
+        problems += 1
+    else:
+        print("  .env               present")
+        ignored = (
+            subprocess.run(
+                ["git", "check-ignore", "-q", ".env"], cwd=root, capture_output=True, check=False
+            ).returncode
+            == 0
+        )
+        tracked = (
+            subprocess.run(
+                ["git", "ls-files", "--error-unmatch", ".env"],
+                cwd=root,
+                capture_output=True,
+                check=False,
+            ).returncode
+            == 0
+        )
+        print(f"  gitignored         {'yes' if ignored else 'NO -- your key would be published'}")
+        print(f"  tracked by git     {'YES -- REMOVE IT NOW' if tracked else 'no'}")
+        problems += (not ignored) + tracked
+
+        from dotenv import dotenv_values
+
+        values = dotenv_values(env_path)
+        checks = {
+            "ODDS_API_KEY": (r"^[0-9a-f]{32}$", "32 lowercase hex characters"),
+            "ANTHROPIC_API_KEY": (r"^sk-ant-\S{20,}$", "starts with sk-ant-"),
+        }
+        for name, (pattern, shape) in checks.items():
+            raw = values.get(name)
+            if not raw or not raw.strip():
+                print(f"  {name:18} missing or empty")
+                problems += 1
+                continue
+            value = raw.strip()
+            masked = f"{value[:6]}...{value[-4:]}" if len(value) > 12 else "(very short)"
+            notes = []
+            if value != raw:
+                notes.append("surrounding whitespace")
+            if value[0] in "\"'":
+                notes.append("remove the quotes")
+            if not re.match(pattern, value):
+                notes.append(f"expected {shape}")
+            status = "; ".join(notes) if notes else "looks right"
+            problems += bool(notes)
+            print(f"  {name:18} {masked}  len={len(value)}  {status}")
+
+    print("\nsetup")
+    db = args.db
+    print(
+        f"  database           {'present' if Path(db).exists() else 'not created -- run `betsim init`'}"
+    )
+    try:
+        load_prompt("stage1_v1"), load_prompt("stage2_v1")
+        print("  prompts            stage1_v1, stage2_v1 found")
+    except FileNotFoundError as exc:
+        print(f"  prompts            {exc}")
+        problems += 1
+
+    print(
+        "\nready"
+        if not problems
+        else f"\n{problems} problem(s) above. Nothing was printed in full and nothing was sent."
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="betsim", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -455,6 +628,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_sl.add_argument("--seed", type=int, default=0, help="seed for the random arm")
     p_sl.add_argument("--dry-run", action="store_true", help="shadow arms only, no LLM calls")
     p_sl.set_defaults(func=cmd_slate)
+
+    p_cl = common(sub.add_parser("close", help="closing snapshot near puck drop (costs credits)"))
+    p_cl.add_argument("--regions", default=REGION)
+    p_cl.add_argument("--record", type=Path, default=None)
+    p_cl.set_defaults(func=cmd_close)
+
+    p_st = common(sub.add_parser("settle", help="score, grade and settle (costs credits)"))
+    p_st.add_argument("--days-from", type=int, default=3, choices=(1, 2, 3))
+    p_st.add_argument("--record", type=Path, default=None)
+    p_st.set_defaults(func=cmd_settle)
+
+    common(sub.add_parser("clv", help="closing line value per arm (free)")).set_defaults(
+        func=cmd_clv
+    )
+
+    common(
+        sub.add_parser("doctor", help="check credentials and setup (free, prints no secrets)"),
+        sport=False,
+    ).set_defaults(func=cmd_doctor)
 
     for name, milestone in NOT_YET.items():
         common(sub.add_parser(name, help=f"not implemented yet ({milestone})")).set_defaults(

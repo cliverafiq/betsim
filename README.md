@@ -29,10 +29,10 @@ the rules that apply to every session.
 
 ## Status
 
-**M4 complete** -- the experiment now places bets. Pure logic, both API
-clients, the blind context, Stage 1 and Stage 2, the validator, an append-only
-ledger and every shadow arm. Closing snapshots and settlement (M5) are next.
-Milestones are tracked in `docs/PLAN.md`.
+**M5 complete** -- the loop closes. Everything above, plus closing
+snapshots, settlement into the ledger, and CLV. The system can now run a full
+day unattended. Reporting and calibration (M6) are next. Milestones are tracked
+in `docs/PLAN.md`.
 
 | Module | What it does |
 |---|---|
@@ -60,12 +60,13 @@ Milestones are tracked in `docs/PLAN.md`.
 | `arms` | Kelly, Elo, favourite and random shadow arms |
 | `ledger` | Append-only bankroll accounting |
 | `slate` | The daily loop across every arm |
+| `settle` | Grading into the ledger, and CLV |
 
 ## Developing
 
 ```bash
 uv sync                  # install
-uv run pytest            # 417 tests, no network, no API keys needed
+uv run pytest            # 434 tests, no network, no API keys needed
 uv run ruff check src tests
 uv run betsim init       # create an empty database
 ```
@@ -74,7 +75,19 @@ Tests never call a paid API or an LLM. Run `pytest` before every commit.
 
 ## Setup
 
-Copy `.env.example` to `.env` and add your keys. `.env` is gitignored.
+Copy `.env.example` to `.env` and add your keys:
+
+```bash
+cp .env.example .env && open -e .env
+```
+
+Paste each key after the `=`, with no quotes and no spaces around the `=`. Then
+check it with `uv run betsim doctor`, which validates both keys' shape without
+printing them.
+
+`.env` is gitignored. Note that `.gitignore` itself **is** committed -- it lists
+filenames for git to skip, so a secret written into it would be published rather
+than protected.
 
 ```bash
 uv run betsim init             # create the database
@@ -89,7 +102,15 @@ uv run betsim forecast --dry-run   # estimate Stage 1, spend nothing
 uv run betsim forecast             # blind Stage 1 draws    (SPENDS MONEY)
 uv run betsim slate --dry-run      # shadow arms only, no LLM calls
 uv run betsim slate                # the full daily loop    (SPENDS MONEY)
+uv run betsim close                # closing snapshot       (1 credit)
+uv run betsim settle               # score, grade, settle   (2 credits)
+uv run betsim clv                  # closing line value     (free)
+uv run betsim doctor               # check setup and keys   (free)
 ```
+
+A full day is `odds` -> `context` -> `forecast` -> `slate` -> `close` (near each
+puck drop) -> `settle`. `betsim doctor` checks credentials and setup without
+printing or transmitting any secret.
 
 `seed-elo` and `context` use the NHL's own API, which is free and needs no key,
 so neither spends Odds API credits.
@@ -153,6 +174,19 @@ The ledger is append-only. Placing appends a negative row, settling appends a
 positive one, and a **loss appends a zero-delta row** so every settled bet leaves
 exactly two rows and settlement is never inferred from a missing one.
 `verify_ledger` re-derives the running balance and runs after every slate.
+
+### Closing snapshots and CLV
+
+A closing line only means anything near the off, so `close` marks a snapshot as
+closing **only for games starting within 15 minutes**. Marking a whole slate
+closing hours early would record the wrong price as the close and make CLV --
+the primary metric -- meaningless.
+
+CLV is derived, not stored: it follows entirely from the price taken and the
+closing price, both already in `odds_snapshots`. `betsim clv` reports it per
+arm, with the `random` arm labelled as the null -- a bet struck at the slate
+snapshot picks up some CLV from timing alone, so the skill signal is the gap to
+`random`, not the raw number.
 
 ### Keeping odds out of the blind stage
 

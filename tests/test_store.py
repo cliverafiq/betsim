@@ -73,7 +73,12 @@ def test_snapshots_are_appended_not_replaced(conn, odds_payload):
     games, prices = parse_odds(odds_payload)
     upsert_games(conn, games)
     insert_snapshots(conn, prices, captured_utc=CAPTURED)
-    insert_snapshots(conn, prices, captured_utc=CAPTURED + timedelta(hours=2), is_closing=True)
+    insert_snapshots(
+        conn,
+        prices,
+        captured_utc=CAPTURED + timedelta(hours=2),
+        closing_game_ids={p.game_id for p in prices},
+    )
     conn.commit()
     assert conn.execute("SELECT COUNT(*) c FROM odds_snapshots").fetchone()["c"] == 24
     closing = conn.execute("SELECT COUNT(*) c FROM odds_snapshots WHERE is_closing=1").fetchone()
@@ -96,7 +101,12 @@ def test_latest_and_closing_prices(conn, odds_payload):
         for p in prices
         if p.game_id == "nhl_car_fla" and p.bookmaker == "pinnacle" and p.selection == "home"
     ]
-    insert_snapshots(conn, shortened, captured_utc=CAPTURED + timedelta(hours=3), is_closing=True)
+    insert_snapshots(
+        conn,
+        shortened,
+        captured_utc=CAPTURED + timedelta(hours=3),
+        closing_game_ids={"nhl_car_fla"},
+    )
     conn.commit()
     assert closing_prices(conn, "nhl_car_fla", bookmaker="pinnacle")["home"] == pytest.approx(1.95)
 
