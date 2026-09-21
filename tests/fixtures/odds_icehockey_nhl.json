@@ -1,0 +1,166 @@
+{
+  "_note": "SYNTHETIC fixture, hand-built to the documented v4 schema -- not recorded from the live API. Re-record with OddsApiClient(record_dir=...) on the first real call.",
+  "quota": {
+    "x-requests-remaining": "499",
+    "x-requests-used": "1",
+    "x-requests-last": "1"
+  },
+  "payload": [
+    {
+      "id": "nhl_car_fla",
+      "sport_key": "icehockey_nhl",
+      "sport_title": "NHL",
+      "commence_time": "2026-09-29T21:00:00Z",
+      "home_team": "Carolina Hurricanes",
+      "away_team": "Florida Panthers",
+      "bookmakers": [
+        {
+          "key": "pinnacle",
+          "title": "Pinnacle",
+          "last_update": "2026-09-29T18:05:00Z",
+          "markets": [
+            {
+              "key": "h2h",
+              "last_update": "2026-09-29T18:05:00Z",
+              "outcomes": [
+                {
+                  "name": "Carolina Hurricanes",
+                  "price": 2.1
+                },
+                {
+                  "name": "Florida Panthers",
+                  "price": 1.8
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "key": "betfair_ex_eu",
+          "title": "Betfair",
+          "last_update": "2026-09-29T18:05:00Z",
+          "markets": [
+            {
+              "key": "h2h",
+              "last_update": "2026-09-29T18:05:00Z",
+              "outcomes": [
+                {
+                  "name": "Carolina Hurricanes",
+                  "price": 2.05
+                },
+                {
+                  "name": "Florida Panthers",
+                  "price": 1.78
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "nhl_tor_mtl",
+      "sport_key": "icehockey_nhl",
+      "sport_title": "NHL",
+      "commence_time": "2026-09-29T23:00:00Z",
+      "home_team": "Toronto Maple Leafs",
+      "away_team": "Montreal Canadiens",
+      "bookmakers": [
+        {
+          "key": "pinnacle",
+          "title": "Pinnacle",
+          "last_update": "2026-09-29T18:05:00Z",
+          "markets": [
+            {
+              "key": "h2h",
+              "last_update": "2026-09-29T18:05:00Z",
+              "outcomes": [
+                {
+                  "name": "Toronto Maple Leafs",
+                  "price": 1.65
+                },
+                {
+                  "name": "Montreal Canadiens",
+                  "price": 2.35
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "key": "betfair_ex_eu",
+          "title": "Betfair",
+          "last_update": "2026-09-29T18:05:00Z",
+          "markets": [
+            {
+              "key": "h2h",
+              "last_update": "2026-09-29T18:05:00Z",
+              "outcomes": [
+                {
+                  "name": "Toronto Maple Leafs",
+                  "price": 1.62
+                },
+                {
+                  "name": "Montreal Canadiens",
+                  "price": 2.3
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "nhl_bos_nyr",
+      "sport_key": "icehockey_nhl",
+      "sport_title": "NHL",
+      "commence_time": "2026-09-30T00:00:00Z",
+      "home_team": "Boston Bruins",
+      "away_team": "New York Rangers",
+      "bookmakers": [
+        {
+          "key": "pinnacle",
+          "title": "Pinnacle",
+          "last_update": "2026-09-29T18:05:00Z",
+          "markets": [
+            {
+              "key": "h2h",
+              "last_update": "2026-09-29T18:05:00Z",
+              "outcomes": [
+                {
+                  "name": "Boston Bruins",
+                  "price": 1.93
+                },
+                {
+                  "name": "New York Rangers",
+                  "price": 1.95
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "key": "betfair_ex_eu",
+          "title": "Betfair",
+          "last_update": "2026-09-29T18:05:00Z",
+          "markets": [
+            {
+              "key": "h2h",
+              "last_update": "2026-09-29T18:05:00Z",
+              "outcomes": [
+                {
+                  "name": "Boston Bruins",
+                  "price": 1.9
+                },
+                {
+                  "name": "New York Rangers",
+                  "price": 1.9
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

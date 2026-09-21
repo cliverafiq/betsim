@@ -29,8 +29,8 @@ the rules that apply to every session.
 
 ## Status
 
-**M0 complete** -- schema and pure logic with tests. Nothing touches the network
-yet. Milestones are tracked in `docs/PLAN.md`.
+**M1 complete** -- the pure logic, plus the Odds API client and ingestion.
+Milestones are tracked in `docs/PLAN.md`.
 
 | Module | What it does |
 |---|---|
@@ -45,12 +45,15 @@ yet. Milestones are tracked in `docs/PLAN.md`.
 | `metrics` | Brier, log loss, ROI, drawdown, CLV, calibration, bootstrap CIs |
 | `models` | Pydantic schemas for every LLM input and output |
 | `db` | SQLite schema; the ledger is append-only |
+| `oddsapi` | The Odds API v4 client, credit accounting, fixture recording |
+| `ingest` | Parsing API payloads into domain objects |
+| `store` | Persisting games, snapshots, scores and run credit spend |
 
 ## Developing
 
 ```bash
 uv sync                  # install
-uv run pytest            # 198 tests, no network, no API keys needed
+uv run pytest            # 267 tests, no network, no API keys needed
 uv run ruff check src tests
 uv run betsim init       # create an empty database
 ```
@@ -59,4 +62,38 @@ Tests never call a paid API or an LLM. Run `pytest` before every commit.
 
 ## Setup
 
-Copy `.env.example` to `.env` and fill in the two keys. `.env` is gitignored.
+Copy `.env.example` to `.env` and add your keys. `.env` is gitignored.
+
+```bash
+uv run betsim init             # create the database
+uv run betsim quota            # check the key and credits  (free)
+uv run betsim events           # fetch the NHL schedule     (free)
+uv run betsim odds             # price snapshot             (1 credit)
+uv run betsim odds --closing   # closing snapshot, for CLV  (1 credit)
+uv run betsim scores           # final scores               (2 credits)
+```
+
+### Credit budget
+
+The free tier is 500 credits a month. `/sports` and `/events` are free, `/odds`
+costs `markets x regions`, and `/scores` costs 2 when reaching back for
+completed games. One NHL day is about **6 credits** -- one slate call, roughly
+three closing snapshots, and settlement -- so **~180 a month**, which the free
+tier covers comfortably. Adding NBA roughly doubles that and leaves no margin,
+so move to the $30 tier at that point.
+
+The client refuses any costed call that would drop the balance below a 25-credit
+reserve, and every run records the credits remaining so the spend is auditable.
+
+### Fixtures
+
+The fixtures in `tests/fixtures/` are **synthetic** -- hand-built to the
+documented v4 schema, not recorded from the live API. Re-record them against the
+real thing on the first authenticated call:
+
+```bash
+uv run betsim odds --record tests/fixtures
+```
+
+The recorder stores only the response body and the three quota headers. The API
+key travels in the query string, so the request URL is never written to disk.
