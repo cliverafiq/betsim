@@ -183,6 +183,12 @@ alone, holding the forecast constant.
 | `elo` | Elo + home ice | quarter Kelly, same caps |
 | `fav` | — | flat 10 units on the favourite |
 | `random` | — | flat 10 units, seeded |
+| `llm_anchored_s1..k` * | — (shown the consensus) | Stage 2, after validation |
+| `best_price` * | — | flat 10 units at the best price anywhere |
+
+`*` exploratory, added after the pre-registration and recorded in
+[`DEVIATIONS.md`](DEVIATIONS.md). They are not part of the confirmatory
+hypotheses.
 
 `fav` and `random` are exempt from **both** the tier and exposure caps: they are
 reference lines, not managed bankrolls. `random` is also the null distribution

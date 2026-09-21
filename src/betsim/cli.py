@@ -73,6 +73,7 @@ DEFAULT_SPORT = "icehockey_nhl"
 NOT_YET: dict[str, str] = {}
 PRIOR_SEASON = 20252026
 NHL_CALL_DELAY = 0.15  # be a considerate client of a free public API
+ANCHORED_PROMPT = "stage2_anchored_v1"
 CHARS_PER_TOKEN = 4  # rough, for the dry run only
 
 
@@ -392,6 +393,11 @@ def cmd_slate(args: argparse.Namespace) -> int:
             return 0
 
         decider = None if args.dry_run else Stage2Decider(model=args.model, effort=args.effort)
+        anchored = (
+            None
+            if args.dry_run or args.no_anchored
+            else Stage2Decider(model=args.model, effort=args.effort, prompt_version=ANCHORED_PROMPT)
+        )
         if args.dry_run:
             print(f"dry run: {len(refs)} games, shadow arms only, no LLM calls")
 
@@ -401,6 +407,7 @@ def cmd_slate(args: argparse.Namespace) -> int:
                 conn,
                 sport=args.sport,
                 decider=decider,
+                anchored=anchored,
                 k=args.k,
                 refs=refs,
                 elo_probs=_elo_probabilities(conn, refs),
@@ -705,6 +712,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_sl.add_argument("--effort", default=EFFORT, choices=("low", "medium", "high", "xhigh", "max"))
     p_sl.add_argument("--seed", type=int, default=0, help="seed for the random arm")
     p_sl.add_argument("--dry-run", action="store_true", help="shadow arms only, no LLM calls")
+    p_sl.add_argument("--no-anchored", action="store_true", help="skip the market-anchored arm")
     p_sl.add_argument(
         "--within-hours", type=int, default=None, help="slate horizon; 0 for no limit"
     )

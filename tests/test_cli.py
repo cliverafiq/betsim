@@ -543,8 +543,16 @@ def test_full_slate_runs_every_arm_and_the_ledger_balances(
         ).fetchone()["s"]
         assert balance(conn, arm) == STARTING_BALANCE_MINOR - staked
 
-    # Stage 2 calls are logged alongside Stage 1.
-    assert conn.execute("SELECT COUNT(*) c FROM llm_calls WHERE stage=2").fetchone()["c"] == 2
+    # The market-anchored arm runs alongside the blind one, so k=2 gives four
+    # Stage 2 calls: two blind decisions and two anchored.
+    assert {"llm_anchored_s1", "llm_anchored_s2"} <= arms
+    assert "best_price" in arms
+    assert conn.execute("SELECT COUNT(*) c FROM llm_calls WHERE stage=2").fetchone()["c"] == 4
+    anchored_prompts = {
+        r["prompt_version"]
+        for r in conn.execute("SELECT DISTINCT prompt_version FROM llm_calls WHERE stage=2")
+    }
+    assert anchored_prompts == {"stage2_v1", "stage2_anchored_v1"}
     conn.close()
 
 

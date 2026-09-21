@@ -71,6 +71,7 @@ def build_slate_payload(
     teams: Mapping[str, tuple[str, str]],
     state: ArmState,
     record: Mapping[str, Any] | None = None,
+    p_market: Mapping[str, Mapping[str, float]] | None = None,
 ) -> dict[str, Any]:
     """Assemble what Stage 2 is shown.
 
@@ -97,6 +98,15 @@ def build_slate_payload(
                     "tier": str(tier),
                     "tier_cap_units": minor_to_units(tier_cap_minor(tier, balance)),
                     "p_blind": round(p_blind.get(game.game_id, {}).get(selection, 0.0), 4),
+                    **(
+                        {
+                            "p_market": round(
+                                (p_market or {}).get(game.game_id, {}).get(selection, 0.0), 4
+                            )
+                        }
+                        if p_market
+                        else {}
+                    ),
                 }
             )
         entries.append(

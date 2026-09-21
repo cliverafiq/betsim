@@ -188,3 +188,39 @@ def elo_probabilities(
             continue
         out[game.game_id] = table.probability(*pair)
     return out
+
+
+def best_price_slate(
+    games: Sequence[GameRef],
+    best: Mapping[str, Mapping[str, tuple[float, str]]],
+    *,
+    stake_minor: int = FLAT_STAKE_MINOR,
+    open_game_ids: frozenset[str] = frozenset(),
+) -> list[ArmBet]:
+    """Flat stake on the market favourite, taken at the **best price anywhere**.
+
+    Deliberately the same selection as ``fav``, so the pair isolates line
+    shopping alone. Any difference between them is a structural edge available
+    without forecasting anything -- and if there is none, that is worth knowing
+    before anyone builds a strategy on it.
+    """
+    bets = []
+    for game in _by_start_time(games):
+        if game.game_id in open_game_ids or not game.prices:
+            continue
+        selection = min(game.prices, key=lambda o: game.prices[o])
+        shopped = (best.get(game.game_id) or {}).get(selection)
+        if shopped is None:
+            continue
+        price, bookmaker = shopped
+        bets.append(
+            ArmBet(
+                game_id=game.game_id,
+                selection=selection,
+                stake_minor=stake_minor,
+                price_decimal=price,
+                tier=assign_tier(price),
+                reason=f"favourite at the best of all books ({bookmaker})",
+            )
+        )
+    return bets

@@ -621,3 +621,47 @@ def latest_calibration(conn: sqlite3.Connection, *, method: str = "platt") -> di
         "n_games": row["n_games"],
         "valid_from_utc": row["valid_from_utc"],
     }
+
+
+def best_prices(
+    conn: sqlite3.Connection,
+    game_ids: Sequence[str],
+    *,
+    market: str = "h2h",
+) -> dict[str, dict[str, tuple[float, str]]]:
+    """The best available price per outcome across every bookmaker stored.
+
+    ``{game_id: {outcome: (price, bookmaker)}}``, from the latest capture. Line
+    shopping is a *structural* edge -- it needs the forecaster to be good at
+    nothing -- so comparing this against the designated book's price measures
+    something real without any model in the loop.
+    """
+    if not game_ids:
+        return {}
+    placeholders = ",".join("?" * len(game_ids))
+    rows = conn.execute(
+        f"""
+        SELECT game_id, bookmaker, outcome, price_decimal, captured_utc
+          FROM odds_snapshots
+         WHERE market = ? AND game_id IN ({placeholders})
+         ORDER BY captured_utc ASC
+        """,
+        (market, *game_ids),
+    ).fetchall()
+
+    latest: dict[str, str] = {}
+    for row in rows:
+        gid = row["game_id"]
+        if gid not in latest or row["captured_utc"] > latest[gid]:
+            latest[gid] = row["captured_utc"]
+
+    out: dict[str, dict[str, tuple[float, str]]] = {}
+    for row in rows:
+        gid = row["game_id"]
+        if row["captured_utc"] != latest[gid]:
+            continue
+        entry = out.setdefault(gid, {})
+        current = entry.get(row["outcome"])
+        if current is None or row["price_decimal"] > current[0]:
+            entry[row["outcome"]] = (row["price_decimal"], row["bookmaker"])
+    return out

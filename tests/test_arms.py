@@ -164,3 +164,35 @@ def test_elo_feeds_kelly_like_any_other_probability_source():
     probs = elo_probabilities([game("g1", prices=EVENS)], table, {"g1": ("CAR", "FLA")})
     bets = kelly_slate([game("g1", prices=EVENS)], probs, balance_minor=STARTING_BALANCE_MINOR)
     assert bets and bets[0].selection == "home"
+
+
+# --- line shopping ----------------------------------------------------------
+
+
+def test_best_price_takes_the_shortest_selection_at_the_longest_price():
+    from betsim.arms import best_price_slate
+
+    g = game("g1", prices={"home": 1.50, "away": 2.80})  # designated book
+    best = {"g1": {"home": (1.62, "bovada"), "away": (2.90, "betmgm")}}
+    (bet,) = best_price_slate([g], best)
+    # Same selection as `fav` -- the pair isolates line shopping alone.
+    assert bet.selection == "home"
+    assert bet.price_decimal == 1.62
+    assert "bovada" in bet.reason
+
+
+def test_best_price_matches_fav_when_no_book_beats_the_designated_one():
+    from betsim.arms import best_price_slate
+
+    g = game("g1", prices={"home": 1.50, "away": 2.80})
+    best = {"g1": {"home": (1.50, "draftkings")}}
+    (shopped,) = best_price_slate([g], best)
+    (flat,) = favourite_slate([g])
+    assert shopped.price_decimal == flat.price_decimal
+    assert shopped.selection == flat.selection
+
+
+def test_best_price_skips_a_game_with_no_shopped_price():
+    from betsim.arms import best_price_slate
+
+    assert best_price_slate([game("g1")], {}) == []

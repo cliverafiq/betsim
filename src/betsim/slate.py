@@ -15,12 +15,14 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from betsim.arms import ArmBet, favourite_slate, kelly_slate, random_slate
-from betsim.config import DESIGNATED_BOOKMAKER, MARKET
+from betsim.arms import ArmBet, best_price_slate, favourite_slate, kelly_slate, random_slate
+from betsim.config import DESIGNATED_BOOKMAKER, MARKET, PRIMARY_DEVIG_METHOD
 from betsim.decider import Stage2Decider, build_slate_payload
+from betsim.devig import consensus
 from betsim.ledger import arm_state, place_bet
 from betsim.sports import get_sport
 from betsim.store import (
+    best_prices,
     forecast_ids_by_seed,
     forecasts_by_seed,
     game_teams,
@@ -83,6 +85,29 @@ def build_game_refs(
     return refs
 
 
+def market_consensus(
+    conn: sqlite3.Connection,
+    game_ids: Sequence[str],
+    outcomes: Sequence[str],
+    *,
+    method: str = PRIMARY_DEVIG_METHOD,
+) -> dict[str, dict[str, float]]:
+    """De-vigged consensus per game, across every bookmaker stored."""
+    out: dict[str, dict[str, float]] = {}
+    for gid in game_ids:
+        books: dict[str, dict[str, float]] = {}
+        for row in conn.execute(
+            "SELECT bookmaker, outcome, price_decimal FROM odds_snapshots "
+            "WHERE game_id = ? AND market = 'h2h'",
+            (gid,),
+        ):
+            books.setdefault(row["bookmaker"], {})[row["outcome"]] = row["price_decimal"]
+        usable = [b for b in books.values() if all(o in b for o in outcomes)]
+        if usable:
+            out[gid] = consensus(usable, outcomes, method)
+    return out
+
+
 def _place_all(
     conn: sqlite3.Connection,
     arm: str,
@@ -109,7 +134,8 @@ def run_slate(
     *,
     sport: str,
     decider: Stage2Decider | None,
-    k: int,
+    anchored: Stage2Decider | None = None,
+    k: int = 1,
     refs: Sequence[GameRef] | None = None,
     now: datetime | None = None,
     elo_probs: Mapping[str, Mapping[str, float]] | None = None,
@@ -195,6 +221,23 @@ def run_slate(
             else:
                 result.record(llm_arm, [])
 
+        # --- the same decision, but anchored to the market ---
+        if anchored is not None:
+            _run_anchored(
+                conn,
+                f"llm_anchored_s{seed + 1}",
+                refs,
+                probs,
+                spec,
+                by_id,
+                teams,
+                anchored,
+                seed,
+                stamp,
+                result,
+                fids.get(seed),
+            )
+
         # --- the sizing counterfactual, on the same probabilities ---
         _run_shadow(
             conn,
@@ -224,8 +267,15 @@ def run_slate(
     if elo_probs:
         _run_shadow(conn, "elo", refs, elo_probs, result, stamp, None, "quarter Kelly on Elo")
 
+    shopped = best_prices(conn, [r.game_id for r in refs])
     for arm, bets in (
         ("fav", favourite_slate(refs, open_game_ids=arm_state(conn, "fav").open_game_ids)),
+        (
+            "best_price",
+            best_price_slate(
+                refs, shopped, open_game_ids=arm_state(conn, "best_price").open_game_ids
+            ),
+        ),
         (
             "random",
             random_slate(
@@ -263,3 +313,71 @@ def _run_shadow(
         reason=reason,
     )
     result.record(arm, _place_all(conn, arm, bets, placed_utc=stamp, forecast_ids=forecast_ids))
+
+
+def _run_anchored(
+    conn: sqlite3.Connection,
+    arm: str,
+    refs: Sequence[GameRef],
+    probs: Mapping[str, Mapping[str, float]],
+    spec,
+    by_id: Mapping[str, GameRef],
+    teams: Mapping[str, tuple[str, str]],
+    decider: Stage2Decider,
+    seed: int,
+    stamp: datetime,
+    result: SlateResult,
+    forecast_ids: Mapping[str, int] | None,
+) -> None:
+    """The market-anchored decision: same forecast, shown the consensus too.
+
+    Tests whether thinking like a bettor -- treating the price as the prior and
+    moving only for a nameable reason -- beats forecasting like an analyst.
+    """
+    state = arm_state(conn, arm)
+    if state.bust:
+        result.record(arm, [])
+        return
+    payload = build_slate_payload(
+        refs,
+        p_blind=probs,
+        teams=teams,
+        state=state,
+        p_market=market_consensus(conn, [r.game_id for r in refs], ("home", "away")),
+    )
+    call = decider.decide(payload, seed_idx=seed)
+    call_id = insert_llm_call(conn, call, stage=2, created_utc=stamp)
+    result.cost_usd += call.cost_usd
+    if call.stop_reason == "refusal":
+        result.refusals += 1
+    if not call.ok:
+        result.record(arm, [])
+        return
+
+    validated = validate_bets(
+        call.proposals,
+        spec=spec,
+        games=by_id,
+        balance_minor=state.balance_minor,
+        now=stamp,
+        open_exposure_minor=state.open_exposure_minor,
+        open_game_ids=state.open_game_ids,
+    )
+    for rejection in validated.rejected:
+        insert_rejection(conn, arm, rejection, llm_call_id=call_id)
+        key = str(rejection.reason)
+        result.rejected[key] = result.rejected.get(key, 0) + 1
+    accepted = [
+        ArmBet(
+            game_id=b.game_id,
+            selection=b.selection,
+            stake_minor=b.stake_minor,
+            price_decimal=b.price_decimal,
+            tier=b.tier,
+            p_blind=probs.get(b.game_id, {}).get(b.selection),
+            p_revised=b.p_revised,
+            reason=b.reason,
+        )
+        for b in validated.accepted
+    ]
+    result.record(arm, _place_all(conn, arm, accepted, placed_utc=stamp, forecast_ids=forecast_ids))
