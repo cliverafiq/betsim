@@ -187,17 +187,26 @@ def test_missing_parsed_output_is_reported():
 
 def test_summarise_counts_and_measures_dispersion():
     fc, _ = make(response(forecast(0.55, 0.45)), response(forecast(0.65, 0.35)))
+    s = summarise(fc.forecast_k(CONTEXT, k=2))
+    assert s["calls"] == 2 and s["ok"] == 2 and s["failed"] == 0 and s["refusals"] == 0
+    assert s["cost_usd"] == pytest.approx(0.027)
+    assert s["mean_p_home"] == pytest.approx(0.6)
+    assert s["max_spread_within_game"] == pytest.approx(0.1)
+
+
+def test_dispersion_is_measured_within_a_game_not_across_the_slate():
+    # Pooling every game's p_home measures how varied the slate is, not how much
+    # the model disagrees with itself on identical input -- which is the signal.
+    import dataclasses
+
+    fc, _ = make(response(forecast(0.55, 0.45)), response(forecast(0.57, 0.43)))
     calls = fc.forecast_k(CONTEXT, k=2)
-    s = summarise(calls)
-    assert s == {
-        "calls": 2,
-        "ok": 2,
-        "failed": 0,
-        "refusals": 0,
-        "cost_usd": pytest.approx(0.027),
-        "mean_p_home": 0.6,
-        "spread_p_home": pytest.approx(0.1),
-    }
+    far_away = [
+        dataclasses.replace(c, game_id="other", probabilities={"home": 0.20, "away": 0.80})
+        for c in calls
+    ]
+    s = summarise([*calls, *far_away])
+    assert s["max_spread_within_game"] == pytest.approx(0.02)
 
 
 def test_summarise_handles_an_all_failed_batch():

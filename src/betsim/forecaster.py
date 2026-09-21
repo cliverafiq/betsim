@@ -199,9 +199,17 @@ def summarise(calls: list[ForecastCall]) -> dict[str, Any]:
         "refusals": sum(1 for c in calls if c.stop_reason == "refusal"),
     }
     if ok:
-        home = [c.probabilities["home"] for c in ok]
-        summary["mean_p_home"] = round(sum(home) / len(home), 4)
-        # Dispersion across draws is a free uncertainty signal -- wide
-        # disagreement means the model is guessing.
-        summary["spread_p_home"] = round(max(home) - min(home), 4)
+        # Dispersion must be measured WITHIN a game. Pooling every game's p_home
+        # measures how much the slate varies, not how much the model disagrees
+        # with itself on identical input -- which is the uncertainty signal.
+        by_game: dict[str, list[float]] = {}
+        for call in ok:
+            by_game.setdefault(call.game_id, []).append(call.probabilities["home"])
+        spreads = [max(v) - min(v) for v in by_game.values() if len(v) > 1]
+        all_home = [p for v in by_game.values() for p in v]
+        summary["mean_p_home"] = round(sum(all_home) / len(all_home), 4)
+        summary["max_spread_within_game"] = round(max(spreads), 4) if spreads else 0.0
+        summary["mean_spread_within_game"] = (
+            round(sum(spreads) / len(spreads), 4) if spreads else 0.0
+        )
     return summary

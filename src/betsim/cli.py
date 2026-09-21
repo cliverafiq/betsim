@@ -350,8 +350,9 @@ def cmd_forecast(args: argparse.Namespace) -> int:
         )
         if "mean_p_home" in summary:
             print(
-                f"  mean p_home {summary['mean_p_home']}, "
-                f"widest spread across draws {summary['spread_p_home']}"
+                f"  mean p_home {summary['mean_p_home']}; disagreement between draws "
+                f"of the same game: mean {summary['mean_spread_within_game']}, "
+                f"max {summary['max_spread_within_game']}"
             )
         print(f"  estimated spend ${summary['cost_usd']}")
         total = llm_spend(conn, stage=1)
@@ -401,6 +402,7 @@ def cmd_slate(args: argparse.Namespace) -> int:
                 sport=args.sport,
                 decider=decider,
                 k=args.k,
+                refs=refs,
                 elo_probs=_elo_probabilities(conn, refs),
                 random_seed=args.seed,
             )

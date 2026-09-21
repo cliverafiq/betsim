@@ -839,3 +839,47 @@ def test_doctor_masks_keys_instead_of_printing_them(tmp_path, monkeypatch, capsy
     assert odds_key not in out
     assert anthropic_key not in out
     assert "aaaaaa...aaaa" in out  # masked form only
+
+
+def test_slate_respects_the_horizon_for_every_arm(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    events_payload,
+    odds_payload,
+    nhl_standings_payload,
+    nhl_schedule_payload,
+):
+    """Regression: run_slate must use the caller's filtered slate.
+
+    It previously re-queried without the horizon, so `fav` and `random` bet
+    every upcoming game -- including ones ten days out, priced now. Those arms
+    are the CLV floor and null, so betting them that far ahead of the close
+    corrupts the benchmark the whole experiment is measured against.
+    """
+    from tests.conftest import shift_slate
+
+    db = _full_pipeline(
+        tmp_path,
+        monkeypatch,
+        events_payload,
+        odds_payload,
+        nhl_standings_payload,
+        nhl_schedule_payload,
+        k=1,
+    )
+    # Push one game far beyond the horizon and re-ingest.
+    shift_slate(odds_payload[2:], 60 * 24 * 10)  # ten days out
+    stub_client(monkeypatch, odds_payload)
+    main(["odds", "--db", str(db)])
+
+    capsys.readouterr()
+    assert main(["slate", "--db", str(db), "--k", "1", "--dry-run"]) == 0
+    assert "2 games" in capsys.readouterr().out
+
+    conn = connect(db)
+    for arm in ("fav", "random"):
+        rows = conn.execute("SELECT game_id FROM bets WHERE arm = ?", (arm,)).fetchall()
+        assert len(rows) == 2, f"{arm} bet outside the horizon"
+        assert odds_payload[2]["id"] not in {r["game_id"] for r in rows}
+    conn.close()
